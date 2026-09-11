@@ -1,0 +1,29 @@
+NOTICE
+======
+
+Этот репозиторий включает вендоренные исходники сторонних проектов с сохранением авторства.
+
+1. Irene-Voice-Assistant (vendor/irene-va/)
+   Лицензия: MIT
+   Copyright (c) 2021-2022 Vladislav Janvarev
+   Copyright (c) 2020 EnjiRouz
+   https://github.com/janvarev/Irene-Voice-Assistant
+
+   Отличия от оригинала: удалены бинарные модели STT (model/*), архив модели
+   webapi-клиента (webapi_client/model.tar.gz), англо-словарь IPA
+   (eng_to_ipa/resources/CMU_dict.json и CMU_source_files), локальные
+   сертификаты localhost.crt/localhost.key и конфигурация FUNDING.
+   Список моделей для ручной загрузки — vendor/irene-va/model/README.md.
+
+2. lingua_franca (vendor/irene-va/lingua_franca/)
+   Библиотека парсинга чисел/дат (включая русский) vendored из Mycroft AI.
+   Лицензия: Apache-2.0 — см. шапки файлов и заголовки модулей.
+   https://github.com/MycroftAI/lingua-franca
+
+Модели (НЕ входят в репозиторий, загружаются отдельно):
+- Vosk (STT) — Alpha Cephei, https://github.com/alphacephei/vosk-api
+- Silero TTS (TTS) — Silero Team, https://github.com/snakers4/silero-models
+- Piper (TTS, альтернатива) — https://github.com/rhasspy/piper
+
+API-ключи (OpenWeatherMap, VseGPT, ElevenLabs, Яндекс.Расписания и т.п.) вводятся
+через настройки плагинов и никогда не коммитятся в репозиторий.

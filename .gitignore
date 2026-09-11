@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Модели STT/TTS (скачиваются отдельно, в гит не храним)
+vendor/irene-va/model/**
+!vendor/irene-va/model/README.md
+*.fst
+*.mdl
+*.tar.gz
+
+# Сгенерированные аудио / кэш TTS
+vendor/irene-va/media/temp/
+*.cache_tts/
+
+# Секреты и локальные сертификаты
+localhost.key
+localhost.crt
+*.pem
+.env
+
+# IDE / ОС
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
