@@ -54,6 +54,8 @@ def start(core:VACore):
             "mpcIsUseHttpRemote": False,
 
             "isOnline": True,
+            "voiceAssNames": "дженет",
+            "voiceAssNames": "дженет",
             #"ttsIndex": 0,
             "useTTSCache": False,
             "ttsEngineId": "pyttsx",

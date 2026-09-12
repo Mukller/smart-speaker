@@ -1,0 +1,25 @@
+D:\Documents\Default Project\smart-speaker\vendor\irene-va\plugins\core.py:53: SyntaxWarning: invalid escape sequence '\P'
+  "mpcHcPath": "C:\Program Files (x86)\K-Lite Codec Pack\MPC-HC64\mpc-hc64_nvo.exe",
+Traceback (most recent call last):
+  File "D:\Documents\Default Project\smart-speaker\vendor\irene-va\jaa.py", line 94, in init_plugin
+    mod = self.import_plugin("plugins."+modname)
+  File "D:\Documents\Default Project\smart-speaker\vendor\irene-va\jaa.py", line 174, in import_plugin
+    __import__(module_name)
+    ~~~~~~~~~~^^^^^^^^^^^^^
+  File "D:\Documents\Default Project\smart-speaker\vendor\irene-va\plugins\plugin_boltalka_vsegpt.py", line 9, in <module>
+    import openai
+ModuleNotFoundError: No module named 'openai'
+Traceback (most recent call last):
+  File "D:\Documents\Default Project\smart-speaker\vendor\irene-va\jaa.py", line 94, in init_plugin
+    mod = self.import_plugin("plugins."+modname)
+  File "D:\Documents\Default Project\smart-speaker\vendor\irene-va\jaa.py", line 174, in import_plugin
+    __import__(module_name)
+    ~~~~~~~~~~^^^^^^^^^^^^^
+  File "D:\Documents\Default Project\smart-speaker\vendor\irene-va\plugins\plugin_playwav_audioplayer.py", line 7, in <module>
+    from audioplayer import AudioPlayer
+ModuleNotFoundError: No module named 'audioplayer'
+Traceback (most recent call last):
+  File "D:\Documents\Default Project\smart-speaker\vendor\irene-va\vacore.py", line 188, in setup_assistant_voice
+    self.playwavs[self.playWavEngineId][0](self)
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^
+KeyError: 'audioplayer'
