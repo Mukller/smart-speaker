@@ -1,44 +1,19 @@
 version: "3.8"
 
 services:
-  vosk-stt:
-    image: python:3.11-slim
-    command: python /app/vosk_asr_server.py --port 2700 --model /models
-    volumes:
-      - ./vendor/irene-va/model:/models:ro
-      - ./vendor/irene-va/vosk_asr_server.py:/app/vosk_asr_server.py:ro
-    networks:
-      - speaker_net
-    restart: unless-stopped
-
-  silero-tts:
-    # Для M1/M6: готовый сервис или локальный python с torch+silero
-    # Использовать Navatusein/Silero-TTS-Service или локальный plugin_tts_silero_v4
-    image: python:3.11-slim
-    command: python -c "
-import sys, os
-# Референс: запуск локального Silero v4 или сервиса
-# Для продакшена — использовать готовый контейнер с torch+silero
-"
+  irene-core:
+    build:
+      context: ..
+      dockerfile: setup/Dockerfile
     ports:
-      - "5002:5000"
-    networks:
-      - speaker_net
-    restart: unless-stopped
-
-  core-api:
-    image: python:3.11-slim
-    working_dir: /app
-    command: python /vendor/irene-va/runva_webapi.py
+      - "5003:5003"
     volumes:
-      - ./:/vendor:ro
-    ports:
-      - "8000:8000"
+      - irene_options:/app/vendor/irene-va/options
     environment:
-      - PYTHONPATH=/vendor/irene-va
-    networks:
-      - speaker_net
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
     restart: unless-stopped
+    depends_on:
+      - ollama
 
   ollama:
     image: ollama/ollama:latest
@@ -46,13 +21,8 @@ import sys, os
       - ollama_data:/root/.ollama
     ports:
       - "11434:11434"
-    networks:
-      - speaker_net
     restart: unless-stopped
 
-networks:
-  speaker_net:
-    driver: bridge
-
 volumes:
+  irene_options:
   ollama_data:
