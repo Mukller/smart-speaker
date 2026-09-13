@@ -9,20 +9,11 @@ services:
       - "5003:5003"
     volumes:
       - irene_options:/app/vendor/irene-va/options
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-    restart: unless-stopped
-    depends_on:
-      - ollama
-
-  ollama:
-    image: ollama/ollama:latest
-    volumes:
-      - ollama_data:/root/.ollama
-    ports:
-      - "11434:11434"
     restart: unless-stopped
 
 volumes:
   irene_options:
-  ollama_data:
