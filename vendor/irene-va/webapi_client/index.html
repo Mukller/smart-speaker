@@ -1,30 +1,256 @@
 <!DOCTYPE html>
-<html lang="en">
-  <head>
-        <meta charset="utf-8" />
-        <title>Irene WEB API Interface</title>
-        <script type="application/javascript" src="vosk.js"></script>
-        <script type="application/javascript" src="index.js"></script>
-        <link rel="stylesheet" href="index.css">
-    </head>
-    <body>
-		<h1>Irene WEB API Interface</h1>
-		Режим:&nbsp;<select id="irenemode">
-			  <option value="none">none</option>
-			  <option value="saytxt">saytxt</option>
-			  <option selected value="saywav">saywav</option>
-			  <option value="saytxt,saywav">saytxt,saywav</option>
-			  <option value="none,saytxt">none,saytxt</option>
-			  <option value="none,saywav">none,saywav</option>
-			  <option value="none,saytxt,saywav">none,saytxt,saywav</option>
-			</select>
-        <div>
-			<br />
-            <button id="trigger" type="button">Начать слушать</button>
-            <div><span id="recognition-result" style="color: #00aa00;"></span> <span id="partial" style="color: #666666;"></span></div>
-        </div>
-		<h2>Текстовый ответ</h2>
-		<div id="irene_answer" style="color: #aa0000;">...</div>
-        
-    </body>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Дженет — Умная колонка</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: system-ui, -apple-system, sans-serif;
+      background: #f5f5f5; color: #1a1a1a;
+      min-height: 100vh; display: flex; flex-direction: column;
+    }
+    .container {
+      width: 100%; max-width: 480px; margin: 0 auto; padding: 1rem;
+      flex: 1; display: flex; flex-direction: column;
+    }
+    h1 { font-size: 1.5rem; margin: 0.5rem 0; text-align: center; }
+    .status { text-align: center; font-size: 0.9rem; color: #666; margin-bottom: 1rem; min-height: 1.2em; }
+    .card {
+      background: #fff; border-radius: 12px; padding: 1rem;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+      margin-bottom: 1rem;
+    }
+    .btn {
+      width: 100%; padding: 0.875rem; font-size: 1rem; font-weight: 600;
+      border: none; border-radius: 8px; cursor: pointer; transition: opacity 0.15s;
+    }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-primary { background: #2f6fed; color: #fff; }
+    .btn-secondary { background: #e5e7eb; color: #1a1a1a; }
+    .btn-danger { background: #ef4444; color: #fff; }
+    .input-group { display: flex; gap: 0.5rem; }
+    .input-group input { flex: 1; padding: 0.75rem; font-size: 1rem; border: 1px solid #d1d5db; border-radius: 8px; }
+    .input-group input:focus { outline: none; border-color: #2f6fed; }
+    .log {
+      flex: 1; overflow-y: auto; padding: 0.75rem;
+      background: #fff; border-radius: 8px; border: 1px solid #e5e7eb;
+      font-family: ui-monospace, monospace; font-size: 0.875rem; line-height: 1.5;
+      max-height: 300px;
+    }
+    .msg { margin-bottom: 0.5rem; padding: 0.5rem; border-radius: 6px; }
+    .msg-user { background: #eff6ff; color: #1e40af; text-align: right; }
+    .msg-assistant { background: #f0fdf4; color: #166534; }
+    .msg-error { background: #fef2f2; color: #991b1b; }
+    .msg-system { background: #f3f4f6; color: #4b5563; font-size: 0.8rem; text-align: center; }
+    .mic-visualizer { display: flex; justify-content: center; gap: 3px; height: 40px; align-items: flex-end; margin: 1rem 0; }
+    .mic-bar { width: 8px; background: #2f6fed; border-radius: 4px; transition: height 0.1s; }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Дженет</h1>
+    <div class="status" id="status">Готов</div>
+
+    <div class="card">
+      <div class="input-group">
+        <input type="text" id="textInput" placeholder="Напишите команду (например: поболтаем как дела)...">
+        <button class="btn btn-primary" id="sendText">Отправить</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <button class="btn btn-primary" id="micBtn">🎤 Начать слушать</button>
+      <button class="btn btn-danger hidden" id="stopBtn">⏹ Остановить</button>
+      <div class="mic-visualizer hidden" id="visualizer">
+        <div class="mic-bar" style="height: 10%"></div>
+        <div class="mic-bar" style="height: 30%"></div>
+        <div class="mic-bar" style="height: 50%"></div>
+        <div class="mic-bar" style="height: 30%"></div>
+        <div class="mic-bar" style="height: 10%"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="log" id="log"></div>
+    </div>
+  </div>
+
+<script>
+const API_BASE = '';
+const WAKE_WORD = 'дженет';  // для sendRawTxt если понадобится
+
+const $ = (id) => document.getElementById(id);
+const log = $('log');
+const statusEl = $('status');
+
+function addMsg(text, type = 'system') {
+  const div = document.createElement('div');
+  div.className = 'msg msg-' + type;
+  div.textContent = text;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+function setStatus(text) { statusEl.textContent = text; }
+
+async function sendCommand(cmd, useRaw = false) {
+  addMsg(cmd, 'user');
+  setStatus('Думает...');
+  try {
+    const endpoint = useRaw ? '/sendRawTxt' : '/sendTxtCmd';
+    const url = API_BASE + endpoint + '?returnFormat=saytxt&' + (useRaw ? 'rawtxt' : 'cmd') + '=' + encodeURIComponent(cmd);
+    const res = await fetch(url);
+    const data = await res.json();
+    if (data.restxt) {
+      addMsg(data.restxt, 'assistant');
+      setStatus('Готов');
+    } else if (data.error) {
+      addMsg('Ошибка: ' + data.error, 'error');
+      setStatus('Ошибка');
+    } else {
+      addMsg('Пустой ответ: ' + JSON.stringify(data), 'error');
+      setStatus('Ошибка');
+    }
+  } catch (e) {
+    addMsg('Сеть: ' + e.message, 'error');
+    setStatus('Ошибка сети');
+  }
+}
+
+// ===== TEXT INPUT =====
+$('sendText').onclick = () => {
+  const v = $('textInput').value.trim();
+  if (v) { $('textInput').value = ''; sendCommand(v); }
+};
+$('textInput').onkeydown = (e) => { if (e.key === 'Enter') $('sendText').click(); };
+
+// ===== WEB SPEECH API (native browser STT) =====
+let recognition = null;
+let isListening = false;
+
+function initRecognition() {
+  if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+    addMsg('Web Speech API не поддерживается в этом браузере', 'error');
+    $('micBtn').disabled = true;
+    return false;
+  }
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  recognition = new SR();
+  recognition.lang = 'ru-RU';
+  recognition.interimResults = true;
+  recognition.continuous = false;
+  recognition.maxAlternatives = 1;
+
+  recognition.onstart = () => {
+    isListening = true;
+    $('micBtn').classList.add('hidden');
+    $('stopBtn').classList.remove('hidden');
+    $('visualizer').classList.remove('hidden');
+    setStatus('Слушаю...');
+    animateVisualizer(true);
+  };
+
+  recognition.onend = () => {
+    isListening = false;
+    $('micBtn').classList.remove('hidden');
+    $('stopBtn').classList.add('hidden');
+    $('visualizer').classList.add('hidden');
+    stopVisualizer();
+    if (!wasFinal) setStatus('Готов');
+  };
+
+  let wasFinal = false;
+  let finalTranscript = '';
+
+  recognition.onresult = (e) => {
+    let interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      if (e.results[i].isFinal) {
+        finalTranscript += e.results[i][0].transcript;
+        wasFinal = true;
+      } else {
+        interim += e.results[i][0].transcript;
+      }
+    }
+    setStatus(interim || finalTranscript || 'Слушаю...');
+  };
+
+  recognition.onerror = (e) => {
+    addMsg('STT ошибка: ' + e.error, 'error');
+  };
+
+  return true;
+}
+
+let visAnim = null;
+function animateVisualizer(on) {
+  const bars = document.querySelectorAll('.mic-bar');
+  if (on) {
+    visAnim = setInterval(() => {
+      bars.forEach(b => b.style.height = (Math.random() * 80 + 10) + '%');
+    }, 100);
+  } else if (visAnim) {
+    clearInterval(visAnim);
+    visAnim = null;
+    bars.forEach(b => b.style.height = '10%');
+  }
+}
+function stopVisualizer() { animateVisualizer(false); }
+
+$('micBtn').onclick = () => {
+  if (!recognition && !initRecognition()) return;
+  wasFinal = false;
+  finalTranscript = '';
+  recognition.start();
+};
+
+$('stopBtn').onclick = () => {
+  if (recognition && isListening) recognition.stop();
+};
+
+let wasFinal = false;
+let finalTranscript = '';
+
+// Patch onresult to capture final
+const origOnResult = recognition?.onresult;
+if (recognition) {
+  recognition.onresult = (e) => {
+    let interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      if (e.results[i].isFinal) {
+        finalTranscript += e.results[i][0].transcript;
+        wasFinal = true;
+      } else {
+        interim += e.results[i][0].transcript;
+      }
+    }
+    setStatus(interim || finalTranscript || 'Слушаю...');
+  };
+}
+
+// After recognition ends, send command
+const origOnEnd = recognition?.onend;
+if (recognition) {
+  recognition.onend = () => {
+    isListening = false;
+    $('micBtn').classList.remove('hidden');
+    $('stopBtn').classList.add('hidden');
+    $('visualizer').classList.add('hidden');
+    stopVisualizer();
+    if (finalTranscript.trim()) {
+      sendCommand(finalTranscript.trim());
+    } else {
+      setStatus('Готов');
+    }
+  };
+}
+
+// Re-init after first load
+if (!recognition) initRecognition();
+
+</script>
+</body>
 </html>
