@@ -28,7 +28,6 @@
     }
     .btn:disabled { opacity: 0.5; cursor: not-allowed; }
     .btn-primary { background: #2f6fed; color: #fff; }
-    .btn-secondary { background: #e5e7eb; color: #1a1a1a; }
     .btn-danger { background: #ef4444; color: #fff; }
     .input-group { display: flex; gap: 0.5rem; }
     .input-group input { flex: 1; padding: 0.75rem; font-size: 1rem; border: 1px solid #d1d5db; border-radius: 8px; }
@@ -56,7 +55,7 @@
 
     <div class="card">
       <div class="input-group">
-        <input type="text" id="textInput" placeholder="Напишите команду (например: поболтаем как дела)...">
+        <input type="text" id="textInput" placeholder="Напишите команду (например: привет)...">
         <button class="btn btn-primary" id="sendText">Отправить</button>
       </div>
     </div>
@@ -80,7 +79,6 @@
 
 <script>
 const API_BASE = '';
-const WAKE_WORD = 'дженет';  // для sendRawTxt если понадобится
 
 const $ = (id) => document.getElementById(id);
 const log = $('log');
@@ -97,11 +95,13 @@ function addMsg(text, type = 'system') {
 function setStatus(text) { statusEl.textContent = text; }
 
 async function sendCommand(cmd, useRaw = false) {
+  const normalizedCmd = cmd.toLowerCase();
   addMsg(cmd, 'user');
   setStatus('Думает...');
   try {
     const endpoint = useRaw ? '/sendRawTxt' : '/sendTxtCmd';
-    const url = API_BASE + endpoint + '?returnFormat=saytxt&' + (useRaw ? 'rawtxt' : 'cmd') + '=' + encodeURIComponent(cmd);
+    const param = useRaw ? 'rawtxt' : 'cmd';
+    const url = API_BASE + endpoint + '?returnFormat=saytxt&' + param + '=' + encodeURIComponent(normalizedCmd);
     const res = await fetch(url);
     const data = await res.json();
     if (data.restxt) {
@@ -130,6 +130,9 @@ $('textInput').onkeydown = (e) => { if (e.key === 'Enter') $('sendText').click()
 // ===== WEB SPEECH API (native browser STT) =====
 let recognition = null;
 let isListening = false;
+let wasFinal = false;
+let finalTranscript = '';
+let visAnim = null;
 
 function initRecognition() {
   if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
@@ -159,11 +162,12 @@ function initRecognition() {
     $('stopBtn').classList.add('hidden');
     $('visualizer').classList.add('hidden');
     stopVisualizer();
-    if (!wasFinal) setStatus('Готов');
+    if (finalTranscript.trim()) {
+      sendCommand(finalTranscript.trim());
+    } else {
+      setStatus('Готов');
+    }
   };
-
-  let wasFinal = false;
-  let finalTranscript = '';
 
   recognition.onresult = (e) => {
     let interim = '';
@@ -179,13 +183,17 @@ function initRecognition() {
   };
 
   recognition.onerror = (e) => {
-    addMsg('STT ошибка: ' + e.error, 'error');
+    if (e.error === 'not-allowed') {
+      addMsg('Микрофон запрещён браузером. Разрешите доступ к микрофону или используйте текстовый ввод.', 'error');
+    } else {
+      addMsg('STT ошибка: ' + e.error, 'error');
+    }
+    setStatus('Готов');
   };
 
   return true;
 }
 
-let visAnim = null;
 function animateVisualizer(on) {
   const bars = document.querySelectorAll('.mic-bar');
   if (on) {
@@ -211,45 +219,8 @@ $('stopBtn').onclick = () => {
   if (recognition && isListening) recognition.stop();
 };
 
-let wasFinal = false;
-let finalTranscript = '';
-
-// Patch onresult to capture final
-const origOnResult = recognition?.onresult;
-if (recognition) {
-  recognition.onresult = (e) => {
-    let interim = '';
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      if (e.results[i].isFinal) {
-        finalTranscript += e.results[i][0].transcript;
-        wasFinal = true;
-      } else {
-        interim += e.results[i][0].transcript;
-      }
-    }
-    setStatus(interim || finalTranscript || 'Слушаю...');
-  };
-}
-
-// After recognition ends, send command
-const origOnEnd = recognition?.onend;
-if (recognition) {
-  recognition.onend = () => {
-    isListening = false;
-    $('micBtn').classList.remove('hidden');
-    $('stopBtn').classList.add('hidden');
-    $('visualizer').classList.add('hidden');
-    stopVisualizer();
-    if (finalTranscript.trim()) {
-      sendCommand(finalTranscript.trim());
-    } else {
-      setStatus('Готов');
-    }
-  };
-}
-
-// Re-init after first load
-if (!recognition) initRecognition();
+// Инициализация при загрузке
+initRecognition();
 
 </script>
 </body>
