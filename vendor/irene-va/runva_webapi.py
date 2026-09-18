@@ -1,5 +1,8 @@
 # ----------
 
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from fastapi import FastAPI, HTTPException
 import uvicorn
 from multiprocessing import Process
@@ -29,6 +32,11 @@ webapi_options = None
 core = None
 model = None # vosk model
 #rec = None # vosk recognizer
+
+# persistent session for Ollama (keep-alive + retries)
+_ollama_session = requests.Session()
+_retry = Retry(total=3, backoff_factor=2, status_forcelist=[502, 503, 504])
+_ollama_session.mount("http://", HTTPAdapter(pool_connections=1, pool_maxsize=1, max_retries=_retry))
 
 # --------------- loading options ----------
 
@@ -82,6 +90,43 @@ def runCmd(cmd:str,returnFormat:str):
     core.lastSay = ""
     core.execute_next(cmd,core.context)
     core.remoteTTS = tmpformat
+
+def call_ollama(prompt, model="qwen2.5:0.5b-instruct", stream=False):
+    url = "http://172.17.0.1:11434/api/generate"
+    payload = {"model": model, "prompt": prompt, "stream": stream, "keep_alive": -1}
+    for attempt in range(1, 4):
+        try:
+            if stream:
+                r = _ollama_session.post(url, json=payload, stream=True, timeout=300)
+                return r  # return raw response for streaming caller
+            else:
+                r = _ollama_session.post(url, json=payload, timeout=300)
+                data = r.json()
+                return data.get("response", "")
+        except Exception as e:
+            if attempt == 3:
+                return "Ошибка LLM: " + str(e)
+            time.sleep(2 ** attempt)
+
+
+def stream_ollama(prompt, model="qwen2.5:0.5b-instruct"):
+    """Generator yielding (thinking, response) chunks from Ollama streaming."""
+    url = "http://172.17.0.1:11434/api/generate"
+    payload = {"model": model, "prompt": prompt, "stream": True, "keep_alive": -1}
+    try:
+        r = _ollama_session.post(url, json=payload, stream=True, timeout=300)
+        for line in r.iter_lines():
+            if not line:
+                continue
+            try:
+                data = json.loads(line.decode("utf-8"))
+            except Exception:
+                continue
+            token = data.get("response", "")
+            thinking = data.get("thinking", "")
+            yield token, thinking
+    except Exception as e:
+        yield "", "Ошибка LLM: " + str(e)
 
 app = FastAPI()
 is_running = True
@@ -319,9 +364,50 @@ async def ttsSay(text:str):
 # выполняет команду Ирины
 # Например: привет, погода.
 @app.get("/sendTxtCmd")
-async def sendSimpleTxtCmd(cmd:str,returnFormat:str = "none"):
-    runCmd(cmd,returnFormat)
-    return core.remoteTTSResult
+async def sendSimpleTxtCmd(cmd:str,returnFormat:str = "saytxt"):
+    result = call_ollama(cmd)
+    return {"restxt": result}
+
+# Streaming endpoint: returns thinking + response as Server-Sent Events
+@app.get("/sendTxtCmdStream")
+async def sendSimpleTxtCmdStream(cmd:str, model:str = "qwen2.5:0.5b-instruct"):
+    from starlette.responses import StreamingResponse
+    import asyncio
+
+    async def event_generator():
+        thinking_parts = []
+        response_parts = []
+        try:
+            for token, thinking in stream_ollama(cmd, model=model):
+                if thinking:
+                    thinking_parts.append(thinking)
+                if token:
+                    response_parts.append(token)
+                # Send every chunk as SSE
+                payload = json.dumps({"model": model, "thinking": "".join(thinking_parts), "response": "".join(response_parts)})
+                yield f"data: {payload}\n\n"
+                await asyncio.sleep(0)
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+# TTS: возвращает WAV-файл с озвучкой ответа
+@app.get("/ttsSayWav")
+async def ttsSayWav(text:str):
+    from starlette.responses import Response
+    import base64
+
+    tmpformat = core.remoteTTS
+    core.remoteTTS = "saywav"
+    core.play_voice_assistant_speech(text)
+    core.remoteTTS = tmpformat
+    wav_b64 = core.remoteTTSResult.get("wav_base64", "")
+    if wav_b64:
+        wav_bytes = base64.b64decode(wav_b64)
+        return Response(content=wav_bytes, media_type="audio/wav")
+    return Response(content=b"", media_type="audio/wav")
 
 # Посылает распознанный текстовый ввод. Если в нем есть имя помощника, выполняется команда.
 # Пример: ирина погода, раз два
@@ -329,64 +415,9 @@ async def sendSimpleTxtCmd(cmd:str,returnFormat:str = "none"):
 async def sendRawTxt(rawtxt:str,returnFormat:str = "none"):
     return sendRawTxtOrig(rawtxt,returnFormat)
 
-def sendRawTxtOrig(rawtxt:str,returnFormat:str = "none"):
-    tmpformat = core.remoteTTS
-    core.remoteTTS = returnFormat
-    core.remoteTTSResult = ""
-    core.lastSay = ""
-    isFound = core.run_input_str(rawtxt)
-    core.remoteTTS = tmpformat
-
-    if isFound:
-        return core.remoteTTSResult
-    else:
-        return "NO_VA_NAME"
-
-# Обновляет контекст на то же самое время
-@app.get("/reinitContext")
-async def reinitContext():
-    if core.contextTimer != None:
-        core.context_set(core.context,core.contextTimerLastDuration)
-    return ""
-
-# Запускает внутреннюю процедуру проверки таймеров. Должна запускаться периодически
-@app.get("/updTimers")
-async def updTimers():
-    #core.say("аа")
-    #print("upd timers")
-    core._update_timers()
-    return ""
-
-# Сообщает серверу, что клиент воспроизвёл ответ и можно начать отсчёт таймера контекста
-@app.get("/replyWasGiven")
-async def replyWasGiven():
-    if core.contextRemoteWaitForCall:
-        if core.contextTimer != None:
-            core.contextTimer.start()
-            #print("debug - run context after webapi call")
-
-def core_update_timers_http(runReq=True):
-    return
-    time.sleep(5) # small sleep before start
-    while is_running:
-        try:
-            import requests
-            if webapi_options["use_ssl"]:
-                reqstr = "https://{0}:{1}/updTimers".format(webapi_options["host"],webapi_options["port"])
-            else:
-                reqstr = "http://{0}:{1}/updTimers".format(webapi_options["host"],webapi_options["port"])
-            #print(reqstr)
-            r = requests.get(reqstr,verify=False)
-        except Exception:
-            pass
-
-        try:
-            time.sleep(2)
-        except:
-            return
-
-    return
-
+def sendRawTxtOrig(rawtxt:str,returnFormat:str = "saytxt"):
+    result = call_ollama(rawtxt)
+    return {"restxt": result}
 
 @app.on_event("shutdown")
 def app_shutdown():
