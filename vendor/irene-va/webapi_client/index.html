@@ -154,6 +154,13 @@
         </div>
       </div>
 
+      <div class="card" style="margin-top:0.75rem;">
+        <div class="quick-btns">
+          <button class="quick-btn" onclick="startVoiceEnroll()">🎤 Записать голос</button>
+          <button class="quick-btn" onclick="exportSession()">💾 Сохранить диалог</button>
+        </div>
+      </div>
+
       <div class="card" style="flex: 1; display: flex; flex-direction: column;">
         <div class="log" id="log"></div>
       </div>
@@ -463,7 +470,117 @@ function setPluginState(name, active) {
   } catch (e) {}
 }
 
-function renderPluginStatus() {
+// Multi-speaker support
+const SPEAKER_PROFILES = {"profiles":{"anton":{"name":"Антон","enrollment_text":"Это Антон, мой голос. Я говорю эти слова для профиля голоса."},"sobesednik1":{"name":"Собеседник 1","enrollment_text":""},"sobesednik2":{"name":"Собеседник 2","enrollment_text":""}},"default_speaker":"anton","threshold":0.30};
+let currentSpeaker = 'anton';
+
+function getSpeakerName(id) {
+  if (SPEAKER_PROFILES.profiles[id]) return SPEAKER_PROFILES.profiles[id].name;
+  return id;
+}
+function setCurrentSpeaker(id) {
+  currentSpeaker = id;
+  console.log('Current speaker set to:', getSpeakerName(id));
+}
+
+// Voice enrollment (B)
+let mediaRecorder = null;
+let audioChunks = [];
+async function startVoiceEnroll() {
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    mediaRecorder.stop();
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mediaRecorder = new MediaRecorder(stream);
+    audioChunks = [];
+    mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+    mediaRecorder.onstop = () => {
+      const blob = new Blob(audioChunks, { type: 'audio/wav' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `enroll_${currentSpeaker}_${Date.now()}.wav`;
+      a.click();
+      URL.revokeObjectURL(url);
+      stream.getTracks().forEach(t => t.stop());
+      addMsg(`Голос записан для ${getSpeakerName(currentSpeaker)} (${blob.size} байт). Поместите .wav в voice-notes/inbox/ для --enroll.`, 'system');
+    };
+    mediaRecorder.start();
+    addMsg(`🎤 Запись голоса для ${getSpeakerName(currentSpeaker)}... Нажмите кнопку снова, чтобы остановить.`, 'system');
+  } catch (e) {
+    addMsg('Ошибка записи: ' + e.message, 'error');
+  }
+}
+
+// Export session (C)
+function exportSession() {
+  const entries = Array.from($('log').children);
+  if (!entries.length) { addMsg('Диалог пуст.', 'system'); return; }
+  const lines = ['# Диалог с колонкой', '', `Экспорт: ${new Date().toLocaleString('ru-RU')}`, ''];
+  entries.forEach(el => {
+    const text = el.querySelector('div')?.textContent || '';
+    const meta = el.querySelector('.msg-meta')?.textContent || '';
+    const type = el.classList.contains('msg-user') ? 'Вы' : (el.classList.contains('msg-assistant') ? 'Колонка' : 'Система');
+    lines.push(`## ${type} ${meta ? `(${meta})` : ''}`);
+    lines.push(text);
+    lines.push('');
+  });
+  const blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `dialog_${new Date().toISOString().slice(0,19).replace(':','-')}.md`;
+  a.click();
+  URL.revokeObjectURL(url);
+  addMsg('Диалог экспортирован в .md', 'system');
+}
+
+// Speaker selection for multi-speaker mode (D)
+function renderSpeakerSelect() {
+  const container = $('speakerSelect');
+  if (!container) return;
+  container.innerHTML = '';
+  Object.keys(SPEAKER_PROFILES.profiles).forEach(id => {
+    const btn = document.createElement('button');
+    btn.className = 'quick-btn' + (id === currentSpeaker ? ' active' : '');
+    btn.style.margin = '2px';
+    btn.textContent = getSpeakerName(id);
+    btn.onclick = () => { setCurrentSpeaker(id); renderSpeakerSelect(); };
+    container.appendChild(btn);
+  });
+}
+
+// Enhanced addMsg with speaker (D)
+const originalAddMsg = addMsg;
+function addMsg(text, type = 'system', metaOverride = null) {
+  if (type === 'user') {
+    text = `${getSpeakerName(currentSpeaker)}: ${text}`;
+  }
+  return originalAddMsg(text, type, metaOverride);
+}
+
+// Add speaker selector to right panel
+function initSpeakerUI() {
+  const panel = $('thinkingPanel');
+  if (!panel) return;
+  const sel = document.createElement('div');
+  sel.id = 'speakerSelect';
+  sel.style.marginTop = '0.5rem';
+  sel.style.padding = '0.5rem';
+  sel.style.background = 'var(--card)';
+  sel.style.borderRadius = '8px';
+  sel.style.border = '1px solid var(--border)';
+  sel.innerHTML = '<div style="font-weight:600;margin-bottom:0.3rem;font-size:0.8rem;">👥 Говорящий:</div>';
+  panel.appendChild(sel);
+  renderSpeakerSelect();
+}
+
+// Init
+initRecognition();
+renderPluginStatus();
+initSpeakerUI();
   const list = $('pluginList');
   if (!list) return;
   list.innerHTML = '';
