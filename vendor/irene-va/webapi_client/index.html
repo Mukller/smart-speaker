@@ -73,7 +73,8 @@
     .msg-assistant { background: #252a33; color: #f3f4f6; }
     .msg-error { background: #2a0f0f; color: #fecaca; }
     .msg-system { background: #15161a; color: var(--muted); font-size: 0.8rem; text-align: center; }
-    .msg-meta { margin-top: 0.4rem; font-size: 0.75rem; color: rgba(255,255,255,0.65); text-align: right; font-family: ui-monospace, monospace; }
+    .msg-meta { margin-top: 0.4rem; font-size: 0.7rem; color: rgba(255,255,255,0.55); text-align: right; font-family: ui-monospace, monospace; letter-spacing: 0.02em; }
+    .msg-meta::before { content: "⏱ "; opacity: 0.7; }
     .mic-visualizer { display: flex; justify-content: center; gap: 3px; height: 40px; align-items: flex-end; margin: 1rem 0; }
     .mic-bar { width: 8px; background: var(--blue); border-radius: 4px; transition: height 0.1s; }
     .hidden { display: none !important; }
@@ -92,6 +93,7 @@
       font-weight: 600; margin-bottom: 0.5rem;
       color: var(--text); display: flex; align-items: center; gap: 0.5rem;
     }
+    .thinking-header::before { content: "🧠"; font-size: 1.1rem; }
     .thinking-content {
       flex: 1; overflow-y: auto; padding: 0.75rem;
       background: var(--chat); border-radius: 8px; border: 1px solid var(--border);
@@ -104,6 +106,18 @@
       background: var(--green); color: #fff; border: none; border-radius: 8px; cursor: pointer;
     }
     .tts-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .quick-btns { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem; }
+    .quick-btn { flex: 1 1 calc(25% - 0.5rem); min-width: 70px; padding: 0.35rem 0.25rem; font-size: 0.8rem; border-radius: 6px; border: none; background: #252a33; color: var(--text); cursor: pointer; transition: background 0.15s; }
+    .quick-btn:hover { background: var(--blue); color: #fff; }
+    /* Plugin status */
+    .plugin-status { margin-top: 0.75rem; padding: 0.75rem; background: var(--panel); border-radius: 8px; border: 1px solid var(--border); }
+    .plugin-item { display: flex; align-items: center; gap: 0.5rem; padding: 0.35rem 0; border-bottom: 1px solid var(--border); font-size: 0.8rem; }
+    .plugin-item:last-child { border-bottom: none; }
+    .plugin-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .plugin-dot.active { background: var(--green); box-shadow: 0 0 4px var(--green); }
+    .plugin-dot.inactive { background: #6b7280; }
+    .plugin-name { font-weight: 600; color: var(--text); }
+    .plugin-desc { color: var(--muted); font-size: 0.75rem; margin-left: auto; }
   </style>
 </head>
 <body>
@@ -131,6 +145,15 @@
         </div>
       </div>
 
+      <div class="card" style="margin-top:0.75rem;">
+        <div class="quick-btns">
+          <button class="quick-btn" onclick="sendQuick('погода')">🌤 Погода</button>
+          <button class="quick-btn" onclick="sendQuick('время')">🕐 Время</button>
+          <button class="quick-btn" onclick="sendQuick('привет')">👋 Привет</button>
+          <button class="quick-btn" onclick="sendQuick('пауза')">⏸ Пауза</button>
+        </div>
+      </div>
+
       <div class="card" style="flex: 1; display: flex; flex-direction: column;">
         <div class="log" id="log"></div>
       </div>
@@ -143,6 +166,11 @@
           <div class="thinking-placeholder">Ожидание запроса...</div>
         </div>
         <button class="tts-btn hidden" id="ttsBtn" onclick="playTTS()">🔊 Озвучить ответ</button>
+      </div>
+      <!-- Plugin status -->
+      <div class="plugin-status" id="pluginStatusPanel">
+        <div class="plugin-section-title">🔌 Статус плагинов</div>
+        <div id="pluginList"></div>
       </div>
     </div>
   </div>
@@ -212,6 +240,12 @@ function flushThinking() {
     thinkingEl.innerHTML = '<div class="thinking-placeholder">Рассуждений нет</div>';
   }
   thinkingDirty = false;
+  // Add reasoning timestamp when reasoning is finished
+  if (thinkingText && lastSentAt) {
+    const now = new Date();
+    const timeStr = now.toLocaleTimeString('ru-RU', {hour: '2-digit', minute:'2-digit'});
+    thinkingEl.innerHTML += `<div class="msg-meta" style="margin-top:0.5rem; text-align:right; opacity:0.6; font-size:0.75rem;">⏱ Рассуждение завершено в ${timeStr}</div>`;
+  }
 }
 
 function showTTSButton(show) {
@@ -306,6 +340,11 @@ async function sendCommand(cmd, useRaw = false) {
 }
 
 // ===== TEXT INPUT =====
+function sendQuick(cmd) {
+  $('textInput').value = cmd;
+  sendCommand(cmd);
+}
+
 $('sendText').onclick = () => {
   const v = $('textInput').value.trim();
   if (v) { $('textInput').value = ''; sendCommand(v); }
@@ -406,8 +445,47 @@ $('stopBtn').onclick = () => {
   if (recognition && isListening) recognition.stop();
 };
 
+// Plugin status data (from plugins_catalog.json)
+const PLUGIN_CATALOG = {"plugins":[{"name":"plugin_fuzzy_thefuzz","plugin_file_check":"plugin_fuzzy_thefuzz.py","url":"https://github.com/janvarev/irene_plugin_fuzzy_thefuzz","description":"Нечеткое распознавание команд через thefuzz","added":"2023-06-10"},{"name":"plugin_fuzzy_ai_sentence","plugin_file_check":"plugin_fuzzy_ai_sentence.py","url":"https://github.com/janvarev/irene_plugin_fuzzy_ai_sentence","description":"Нечеткое распознавание команд через ai sentence","added":"2023-06-10"},{"name":"plugin_boltalka_openai","plugin_file_check":"plugin_boltalka_openai.py","url":"https://github.com/janvarev/irene_plugin_boltalka_openai","description":"Болталка с OpenAI","added":"2023-05-10"},{"name":"plugin_boltalka2_openai","plugin_file_check":"plugin_boltalka2_openai.py","url":"https://github.com/janvarev/irene_plugin_boltalka2_openai","description":"Болталка с OpenAI v2","added":"2023-05-10"}]};
+
+function getPluginState() {
+  try {
+    return JSON.parse(localStorage.getItem('kolonka_plugin_status') || '{}');
+  } catch (e) {
+    return {};
+  }
+}
+function setPluginState(name, active) {
+  try {
+    const state = getPluginState();
+    state[name] = active;
+    localStorage.setItem('kolonka_plugin_status', JSON.stringify(state));
+  } catch (e) {}
+}
+
+function renderPluginStatus() {
+  const list = $('pluginList');
+  if (!list) return;
+  list.innerHTML = '';
+  const state = getPluginState();
+  PLUGIN_CATALOG.plugins.forEach(p => {
+    const active = state[p.name] !== undefined ? state[p.name] : (p.name === 'plugin_greetings' ? true : false);
+    const item = document.createElement('div');
+    item.className = 'plugin-item';
+    item.style.cursor = 'pointer';
+    item.onclick = () => {
+      const newActive = !active;
+      setPluginState(p.name, newActive);
+      renderPluginStatus();
+    };
+    item.innerHTML = `<span class="plugin-dot ${active ? 'active' : 'inactive'}"></span><span class="plugin-name">${p.name.replace('plugin_', '').replace('_', ' ')}</span><span class="plugin-desc">${p.description}</span>`;
+    list.appendChild(item);
+  });
+}
+
 // Init
 initRecognition();
+renderPluginStatus();
 </script>
 </body>
 </html>

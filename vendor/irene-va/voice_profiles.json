@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "anton": {
+      "name": "Антон",
+      "enrollment_text": "Это Антон, мой голос. Я говорю эти слова для профиля голоса."
+    }
+  },
+  "default_speaker": "anton",
+  "threshold": 0.30
+}
