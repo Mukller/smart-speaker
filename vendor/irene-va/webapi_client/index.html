@@ -18,6 +18,18 @@
       --red: #ef4444;
       --green: #10b981;
     }
+    html[data-theme="light"] {
+      --bg: #f8fafc;
+      --panel: #f1f5f9;
+      --card: #ffffff;
+      --chat: #f8fafc;
+      --border: #e2e8f0;
+      --text: #0f172a;
+      --muted: #64748b;
+      --blue: #2563eb;
+      --red: #dc2626;
+      --green: #059669;
+    }
     body {
       margin: 0; font-family: system-ui, -apple-system, sans-serif;
       background: var(--bg); color: var(--text);
@@ -69,10 +81,10 @@
       max-height: 400px;
     }
     .msg { margin-bottom: 0.75rem; padding: 0.5rem; border-radius: 6px; }
-    .msg-user { background: #1f232b; color: #f3f4f6; text-align: right; }
-    .msg-assistant { background: #252a33; color: #f3f4f6; }
-    .msg-error { background: #2a0f0f; color: #fecaca; }
-    .msg-system { background: #15161a; color: var(--muted); font-size: 0.8rem; text-align: center; }
+    .msg-user { background: var(--panel); color: var(--text); text-align: right; }
+    .msg-assistant { background: var(--chat); color: var(--text); }
+    .msg-error { background: var(--red); color: #fff; }
+    .msg-system { background: var(--chat); color: var(--muted); font-size: 0.8rem; text-align: center; }
     .msg-meta { margin-top: 0.4rem; font-size: 0.7rem; color: rgba(255,255,255,0.55); text-align: right; font-family: ui-monospace, monospace; letter-spacing: 0.02em; }
     .msg-meta::before { content: "⏱ "; opacity: 0.7; }
     .mic-visualizer { display: flex; justify-content: center; gap: 3px; height: 40px; align-items: flex-end; margin: 1rem 0; }
@@ -107,7 +119,7 @@
     }
     .tts-btn:disabled { opacity: 0.5; cursor: not-allowed; }
     .quick-btns { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem; }
-    .quick-btn { flex: 1 1 calc(25% - 0.5rem); min-width: 70px; padding: 0.35rem 0.25rem; font-size: 0.8rem; border-radius: 6px; border: none; background: #252a33; color: var(--text); cursor: pointer; transition: background 0.15s; }
+    .quick-btn { flex: 1 1 calc(25% - 0.5rem); min-width: 70px; padding: 0.35rem 0.25rem; font-size: 0.8rem; border-radius: 6px; border: none; background: var(--panel); color: var(--text); cursor: pointer; transition: background 0.15s; }
     .quick-btn:hover { background: var(--blue); color: #fff; }
     /* Plugin status */
     .plugin-status { margin-top: 0.75rem; padding: 0.75rem; background: var(--panel); border-radius: 8px; border: 1px solid var(--border); }
@@ -125,6 +137,7 @@
     <div class="left-panel">
       <h1>Дженет</h1>
       <div class="status" id="status">Готов</div>
+      <button class="btn" id="themeToggle" onclick="toggleTheme()" style="margin: 0.5rem 0; padding: 0.5rem; font-size: 0.8rem;">🌙 Тема</button>
 
       <div class="card">
         <div class="input-group">
@@ -299,31 +312,19 @@ async function sendCommand(cmd, useRaw = false) {
     try {
         const endpoint = useRaw ? '/sendRawTxt' : '/sendTxtCmd';
         const param = useRaw ? 'rawtxt' : 'cmd';
-        const url = API_BASE + '/sendTxtCmdStream?' + param + '=' + encodeURIComponent(normalizedCmd);
+        
+        // Use non-streaming endpoint (streaming hangs on container, fallback works)
+        const url = API_BASE + endpoint + '?' + param + '=' + encodeURIComponent(normalizedCmd);
         const res = await fetch(url, { signal: controller.signal });
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop();
-            for (const line of lines) {
-                const m = line.match(/^data:\s*(.*)$/);
-                if (!m) continue;
-                const data = m[1].trim();
-                if (data === '[DONE]') break;
-                try {
-                    const parsed = JSON.parse(data);
-                    if (parsed.error) { addMsg('Ошибка: ' + parsed.error, 'error'); continue; }
-                    if (parsed.model) lastModel = parsed.model;
-                    if (parsed.thinking) { thinkingText = parsed.thinking; thinkingDirty = true; }
-                    if (parsed.response) { lastAnswer = parsed.response; thinkingDirty = true; }
-                } catch (e) { /* skip malformed */ }
-            }
+        if (!res.ok) {
+            addMsg('Ошибка сервера: ' + res.status, 'error');
+            setStatus('Ошибка сервера');
+        } else {
+            const data = await res.json();
+            if (data.response || data.restxt) { lastAnswer = data.response || data.restxt; }
+            if (data.thinking) { thinkingText = data.thinking; }
+            if (data.model) lastModel = data.model;
+            if (data.error) { addMsg('Ошибка: ' + data.error, 'error'); }
         }
     } catch (e) {
         if (e.name === 'AbortError') {
@@ -357,6 +358,20 @@ $('sendText').onclick = () => {
   if (v) { $('textInput').value = ''; sendCommand(v); }
 };
 $('textInput').onkeydown = (e) => { if (e.key === 'Enter') $('sendText').click(); };
+
+// Theme toggle
+function initTheme() {
+  const saved = localStorage.getItem('kolonka_theme') || 'dark';
+  document.documentElement.setAttribute('data-theme', saved);
+  $('themeToggle').textContent = saved === 'dark' ? '☀️ Тема' : '🌙 Тема';
+}
+function toggleTheme() {
+  const current = document.documentElement.getAttribute('data-theme') || 'dark';
+  const next = current === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  localStorage.setItem('kolonka_theme', next);
+  $('themeToggle').textContent = next === 'dark' ? '☀️ Тема' : '🌙 Тема';
+}
 
 // ===== WEB SPEECH API (native browser STT) =====
 let recognition = null;
@@ -430,22 +445,44 @@ function initRecognition() {
 function animateVisualizer(on) {
   const bars = document.querySelectorAll('.mic-bar');
   if (on) {
-    visAnim = setInterval(() => {
-      bars.forEach(b => b.style.height = (Math.random() * 80 + 10) + '%');
-    }, 100);
-  } else if (visAnim) {
-    clearInterval(visAnim);
+    if (!window.audioContext) {
+      window.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if (!window.analyser) {
+      window.analyser = window.audioContext.createAnalyser();
+      window.analyser.fftSize = 256;
+      window.mediaStreamSource = window.audioContext.createMediaStreamSource(window.micStream);
+      window.mediaStreamSource.connect(window.analyser);
+    }
+    const bufferLength = window.analyser.frequencyBinCount;
+    const dataArray = new Uint8Array(bufferLength);
+    visAnim = requestAnimationFrame(function animate() {
+      window.analyser.getByteFrequencyData(dataArray);
+      const avg = dataArray.reduce((a, b) => a + b, 0) / bufferLength;
+      const height = Math.max(10, Math.min(100, (avg / 128) * 100));
+      bars.forEach((b, i) => {
+        b.style.height = (height * (0.5 + 0.5 * Math.random())) + '%';
+      });
+      if (window.isVisualizing) visAnim = requestAnimationFrame(animate);
+    });
+  } else {
+    if (visAnim) cancelAnimationFrame(visAnim);
     visAnim = null;
     bars.forEach(b => b.style.height = '10%');
   }
 }
 function stopVisualizer() { animateVisualizer(false); }
 
-$('micBtn').onclick = () => {
+$('micBtn').onclick = async () => {
   if (!recognition && !initRecognition()) return;
   wasFinal = false;
   finalTranscript = '';
-  recognition.start();
+  try {
+    window.micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    recognition.start();
+  } catch (e) {
+    addMsg('Микрофон недоступен: ' + e.message, 'error');
+  }
 };
 
 $('stopBtn').onclick = () => {
@@ -468,6 +505,26 @@ function setPluginState(name, active) {
     state[name] = active;
     localStorage.setItem('kolonka_plugin_status', JSON.stringify(state));
   } catch (e) {}
+}
+
+function renderPluginStatus() {
+  const list = $('pluginList');
+  if (!list) return;
+  list.innerHTML = '';
+  const state = getPluginState();
+  PLUGIN_CATALOG.plugins.forEach(p => {
+    const active = state[p.name] !== undefined ? state[p.name] : (p.name === 'plugin_greetings' ? true : false);
+    const item = document.createElement('div');
+    item.className = 'plugin-item';
+    item.style.cursor = 'pointer';
+    item.onclick = () => {
+      const newActive = !active;
+      setPluginState(p.name, newActive);
+      renderPluginStatus();
+    };
+    item.innerHTML = `<span class="plugin-dot ${active ? 'active' : 'inactive'}"></span><span class="plugin-name">${p.name.replace('plugin_', '').replace('_', ' ')}</span><span class="plugin-desc">${p.description}</span>`;
+    list.appendChild(item);
+  });
 }
 
 // Multi-speaker support
@@ -538,49 +595,7 @@ function exportSession() {
 }
 
 // Speaker selection for multi-speaker mode (D)
-function renderSpeakerSelect() {
-  const container = $('speakerSelect');
-  if (!container) return;
-  container.innerHTML = '';
-  Object.keys(SPEAKER_PROFILES.profiles).forEach(id => {
-    const btn = document.createElement('button');
-    btn.className = 'quick-btn' + (id === currentSpeaker ? ' active' : '');
-    btn.style.margin = '2px';
-    btn.textContent = getSpeakerName(id);
-    btn.onclick = () => { setCurrentSpeaker(id); renderSpeakerSelect(); };
-    container.appendChild(btn);
-  });
-}
-
-// Enhanced addMsg with speaker (D)
-const originalAddMsg = addMsg;
-function addMsg(text, type = 'system', metaOverride = null) {
-  if (type === 'user') {
-    text = `${getSpeakerName(currentSpeaker)}: ${text}`;
-  }
-  return originalAddMsg(text, type, metaOverride);
-}
-
-// Add speaker selector to right panel
-function initSpeakerUI() {
-  const panel = $('thinkingPanel');
-  if (!panel) return;
-  const sel = document.createElement('div');
-  sel.id = 'speakerSelect';
-  sel.style.marginTop = '0.5rem';
-  sel.style.padding = '0.5rem';
-  sel.style.background = 'var(--card)';
-  sel.style.borderRadius = '8px';
-  sel.style.border = '1px solid var(--border)';
-  sel.innerHTML = '<div style="font-weight:600;margin-bottom:0.3rem;font-size:0.8rem;">👥 Говорящий:</div>';
-  panel.appendChild(sel);
-  renderSpeakerSelect();
-}
-
-// Init
-initRecognition();
-renderPluginStatus();
-initSpeakerUI();
+function renderPluginStatus() {
   const list = $('pluginList');
   if (!list) return;
   list.innerHTML = '';
@@ -600,9 +615,41 @@ initSpeakerUI();
   });
 }
 
+function renderSpeakerSelect() {
+  const container = $('speakerSelect');
+  if (!container) return;
+  container.innerHTML = '';
+  Object.keys(SPEAKER_PROFILES.profiles).forEach(id => {
+    const btn = document.createElement('button');
+    btn.className = 'quick-btn' + (id === currentSpeaker ? ' active' : '');
+    btn.style.margin = '2px';
+    btn.textContent = getSpeakerName(id);
+    btn.onclick = () => { setCurrentSpeaker(id); renderSpeakerSelect(); };
+    container.appendChild(btn);
+  });
+}
+
+// Add speaker selector to right panel
+function initSpeakerUI() {
+  const panel = $('thinkingPanel');
+  if (!panel) return;
+  const sel = document.createElement('div');
+  sel.id = 'speakerSelect';
+  sel.style.marginTop = '0.5rem';
+  sel.style.padding = '0.5rem';
+  sel.style.background = 'var(--card)';
+  sel.style.borderRadius = '8px';
+  sel.style.border = '1px solid var(--border)';
+  sel.innerHTML = '<div style="font-weight:600;margin-bottom:0.3rem;font-size:0.8rem;">👥 Говорящий:</div>';
+  panel.appendChild(sel);
+  renderSpeakerSelect();
+}
+
 // Init
+initTheme();
 initRecognition();
 renderPluginStatus();
+initSpeakerUI();
 </script>
 </body>
 </html>
