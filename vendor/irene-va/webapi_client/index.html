@@ -595,26 +595,6 @@ function exportSession() {
 }
 
 // Speaker selection for multi-speaker mode (D)
-function renderPluginStatus() {
-  const list = $('pluginList');
-  if (!list) return;
-  list.innerHTML = '';
-  const state = getPluginState();
-  PLUGIN_CATALOG.plugins.forEach(p => {
-    const active = state[p.name] !== undefined ? state[p.name] : (p.name === 'plugin_greetings' ? true : false);
-    const item = document.createElement('div');
-    item.className = 'plugin-item';
-    item.style.cursor = 'pointer';
-    item.onclick = () => {
-      const newActive = !active;
-      setPluginState(p.name, newActive);
-      renderPluginStatus();
-    };
-    item.innerHTML = `<span class="plugin-dot ${active ? 'active' : 'inactive'}"></span><span class="plugin-name">${p.name.replace('plugin_', '').replace('_', ' ')}</span><span class="plugin-desc">${p.description}</span>`;
-    list.appendChild(item);
-  });
-}
-
 function renderSpeakerSelect() {
   const container = $('speakerSelect');
   if (!container) return;
