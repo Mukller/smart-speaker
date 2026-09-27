@@ -361,12 +361,71 @@ async def ttsSay(text:str):
     return ""
 
 
-# выполняет команду Ирины
-# Например: привет, погода.
+# Выполняет команду ассистента через систему плагинов (VACore).
+# Классические плагины (привет/время/погода/...) работают мгновенно и точно.
+# LLM используется только как фоллбэк, если ни один плагин не подошёл.
+def _first_assistant_name():
+    try:
+        names = core.voiceAssNames
+        if isinstance(names, str):
+            return names.split("|")[0]
+        return list(names)[0]
+    except Exception:
+        return ""
+
+
+def _with_call_name(cmd):
+    """VACore требует имя ассистента первым словом: "дженет привет"."""
+    cmd = (cmd or "").strip()
+    if not cmd:
+        return cmd
+    try:
+        names = core.voiceAssNames
+        names = names.split("|") if isinstance(names, str) else list(names)
+    except Exception:
+        names = []
+    first = cmd.split(" ")[0]
+    if first in names:
+        return cmd
+    name = _first_assistant_name()
+    return (name + " " + cmd) if name else cmd
+
+
+def _try_plugins(cmd):
+    """Возвращает текст ответа плагина или None, если плагин не сработал."""
+    try:
+        saved_tts = core.remoteTTS
+        saved_res = core.remoteTTSResult
+        core.remoteTTS = "saytxt,none"
+        core.remoteTTSResult = {}
+        ran = core.run_input_str(_with_call_name(cmd))
+        result = (core.remoteTTSResult or {}).get("restxt", "")
+        core.remoteTTS = saved_tts
+        core.remoteTTSResult = saved_res
+        text = str(result).strip() if result else ""
+        if not ran or not text:
+            return None
+        # Классическая система при несовпадении команды отвечает
+        # настроенным "не поняла" вместо фоллбэка в LLM - считаем это
+        # отсутствием совпадения, чтобы уйти в LLM.
+        not_found = str(getattr(core, "replyNoCommandFound", "") or "").strip()
+        if not_found and text == not_found:
+            return None
+        if text.lower().startswith("извини, я не поняла"):
+            return None
+        return text
+    except Exception:
+        import traceback
+        traceback.print_exc()
+    return None
+
+
 @app.get("/sendTxtCmd")
 async def sendSimpleTxtCmd(cmd:str,returnFormat:str = "saytxt"):
-    result = call_ollama(cmd)
-    return {"restxt": result}
+    plugin_answer = _try_plugins(cmd)
+    if plugin_answer is not None:
+        return {"restxt": plugin_answer, "source": "plugin"}
+    return {"restxt": call_ollama(cmd), "source": "llm"}
 
 # Streaming endpoint: returns thinking + response as Server-Sent Events
 @app.get("/sendTxtCmdStream")
@@ -375,6 +434,12 @@ async def sendSimpleTxtCmdStream(cmd:str, model:str = "qwen2.5:0.5b-instruct"):
     import asyncio
 
     async def event_generator():
+        # Плагин отвечает мгновенно и без "размышлений" - отдаём его сразу.
+        plugin_answer = _try_plugins(cmd)
+        if plugin_answer is not None:
+            yield "data: " + json.dumps({"response": plugin_answer, "source": "plugin"}) + "\n\n"
+            yield "data: [DONE]\n\n"
+            return
         thinking_parts = []
         response_parts = []
         try:
