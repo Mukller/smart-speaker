@@ -201,6 +201,41 @@ echo "$r" | grep -q '"source": *"plugin"' \
   && ok "погода -> плагин ($(echo "$r" | head -c 60))" \
   || { bad "погода ушла в LLM вместо плагина: $(echo "$r" | head -c 60)"; fails=1; }
 
+# wttr.in ищет город по названию и молча подставляет одноимённую деревню, если
+# название неоднозначно: «Insk» вернул Постниково (Кировская обл., Россия), а
+# «Insk,Belarus» — Berezenka (Могилёвская обл.). Поэтому сверяем, куда город
+# реально распознался, а не доверяем строке в конфиге.
+say "город погоды: проверяю, что он распознан верно"
+loc=$(timeout 30 docker exec "$CONTAINER" python3 -c "
+import json
+print(json.load(open('/app/vendor/irene-va/options/plugin_weather_wttr.json')).get('location',''))" 2>/dev/null)
+case "$loc" in
+    *.*,*)  # координаты «lat,lon» — сверять нечего
+        ok "город задан координатами ($loc), неоднозначности нет"
+        ;;
+    *)
+        resolved=$(timeout 30 curl -s --max-time 25 \
+            "https://wttr.in/$(python3 -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))' "$loc")?format=j1" \
+            | python3 -c "
+import json,sys
+try:
+    a=(json.load(sys.stdin).get('nearest_area') or [{}])[0]
+    print('%s / %s / %s' % (a.get('areaName',[{}])[0].get('value','?'),
+                            a.get('region',[{}])[0].get('value','?'),
+                            a.get('country',[{}])[0].get('value','?')))
+except Exception:
+    print('?')" 2>/dev/null)
+        want=$(printf '%s' "$loc" | sed 's/,.*//' | tr -d '[:upper:]')
+        got=$(printf '%s' "$resolved" | tr -d '[:upper:]')
+        case "$got" in
+            *"$want"*) ok "«$loc» -> $resolved" ;;
+            *) bad "«$loc» распознан как $resolved — это не тот город."
+               bad "  Уточни CITY (например CITY='Insk,Belarus') или передай координаты."
+               fails=1 ;;
+        esac
+        ;;
+esac
+
 avail=$(free -m | awk '/^Mem:/{print $7}')
 [ "${avail:-0}" -ge 800 ] \
   && ok "свободной памяти ${avail} МБ" \
