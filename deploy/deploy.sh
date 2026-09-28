@@ -18,6 +18,7 @@
 #     DOMAIN     внешний домен                (default antonpetnitsky.com)
 #     EXT_IP     внешний IP                   (default 46.216.19.51)
 #     ASSISTANT  имя ассистента                (default дженет)
+#     CITY       город для плагина погоды       (default Minsk)
 #     NO_RESTART=1  не перезапускать контейнер
 # =============================================================================
 set -uo pipefail
@@ -27,6 +28,7 @@ CONTAINER="${CONTAINER:-setup-irene-core-1}"
 DOMAIN="${DOMAIN:-antonpetnitsky.com}"
 EXT_IP="${EXT_IP:-46.216.19.51}"
 ASSISTANT="${ASSISTANT:-дженет}"
+CITY="${CITY:-Minsk}"
 VENDOR="$REPO_DIR/vendor/irene-va"
 API="http://127.0.0.1:5003"
 
@@ -47,35 +49,65 @@ say "1/5 настройки ассистента (options/core.json)"
 #                     веб-интерфейсе делает браузер (Web Speech API).
 #  playWavEngineId  — consolewav: 'audioplayer' требует модуль gi, которого нет,
 #                     из-за чего был зависший ответ и ошибка инициализации.
-python3 - "$CONTAINER" "$ASSISTANT" <<'PY'
+python3 - "$CONTAINER" "$ASSISTANT" "$CITY" <<'PY'
 import json, shutil, subprocess, sys, time
-container, assistant = sys.argv[1], sys.argv[2]
-path = "/app/vendor/irene-va/options/core.json"
-raw = subprocess.run(["docker", "exec", container, "cat", path],
-                     capture_output=True)
-if raw.returncode != 0:
-    sys.exit("cannot read " + path)
-cfg = json.loads(raw.stdout.decode("utf-8"))
-want = {"voiceAssNames": assistant, "ttsEngineId": "console",
-        "playWavEngineId": "consolewav"}
-changed = {k: (cfg.get(k), v) for k, v in want.items() if cfg.get(k) != v}
-if not changed:
-    print("    уже актуально, запись не требуется")
-    sys.exit(0)
-shutil.copy(path, path + ".bak." + str(int(time.time())))
-cfg.update(want)
-with open(path, "w", encoding="utf-8") as f:
-    json.dump(cfg, f, ensure_ascii=False, indent=4)
-for k, (old, new) in changed.items():
-    print("    %-15s %r -> %r" % (k, old, new))
+container, assistant, city = sys.argv[1], sys.argv[2], sys.argv[3]
+base = "/app/vendor/irene-va/options"
+
+# wttr.in needs no API key (openweathermap does), just activation + a city,
+# so 'погода' is answered by the plugin instead of falling through to the LLM.
+targets = {
+    "core.json": {"voiceAssNames": assistant, "ttsEngineId": "console",
+                  "playWavEngineId": "consolewav"},
+    "plugin_weather_wttr.json": {"is_active": True, "location": city},
+    "plugin_weatherowm.json": {"is_active": False},
+}
+for name, want in targets.items():
+    path = "%s/%s" % (base, name)
+    raw = subprocess.run(["docker", "exec", container, "cat", path],
+                         capture_output=True)
+    if raw.returncode != 0:
+        print("    WARN: не читается %s" % name)
+        continue
+    cfg = json.loads(raw.stdout.decode("utf-8"))
+    changed = {k: (cfg.get(k), v) for k, v in want.items() if cfg.get(k) != v}
+    if not changed:
+        print("    %-28s уже актуально" % name)
+        continue
+    shutil.copy(path, path + ".bak." + str(int(time.time())))
+    cfg.update(want)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=4)
+    for k, (old, new) in changed.items():
+        print("    %-28s %r -> %r" % (name, old, new))
 PY
-[ $? -eq 0 ] || die "не удалось применить core.json"
-ok "core.json"
+[ $? -eq 0 ] || die "не удалось применить options"
+ok "core.json + погода"
+
+say "1b/5 свободная память (без неё контейнер зависает на старте)"
+avail=$(free -m | awk '/^Mem:/{print $7}')
+if [ "${avail:-0}" -lt 1500 ]; then
+    warn "доступно ${avail} МБ — контейнер может не подняться."
+    warn "Основные потребители: voice-notes pipeline (~3.7 ГБ, простаивает),"
+    warn "ollama runner (~1.6 ГБ), java-серверы Minecraft (~5.7 ГБ)."
+    warn "Освободи память вручную либо останови voice-notes:"
+    warn "  pkill -f 'app/pipeline.py --watch'   # поднимет cron, если он включён"
+else
+    ok "доступно ${avail} МБ"
+fi
 
 # -----------------------------------------------------------------------------
 say "2/5 файлы внутри контейнера"
 # Файлы НЕ монтируются в контейнер (в compose только том options), поэтому
 # каждый раз копируем вручную, иначе контейнер продолжит отдавать старый код.
+if ! timeout 60 docker inspect "$CONTAINER" >/dev/null 2>&1; then
+    warn "контейнера $CONTAINER нет — пересоздаю из compose"
+    ( cd "$REPO_DIR/setup" && timeout 900 docker compose up -d ) 2>&1 | tail -3
+    for _ in $(seq 1 60); do
+        [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$API/webapi_client/" || true)" = "200" ] && break
+        sleep 5
+    done
+fi
 for rel in webapi_client/index.html plugins/plugin_greetings.py \
            voice_profiles.json runva_webapi.py; do
     [ -f "$VENDOR/$rel" ] || { warn "нет файла $rel — пропускаю"; continue; }
@@ -163,6 +195,16 @@ r=$(call "$ASSISTANT привет")
 echo "$r" | grep -q 'Привет\|привет' \
   && ok "обращение по имени ($ASSISTANT) работает" \
   || { bad "имя не подставляется: $(echo "$r" | head -c 60)"; fails=1; }
+
+r=$(call "погода")
+echo "$r" | grep -q '"source": *"plugin"' \
+  && ok "погода -> плагин ($(echo "$r" | head -c 60))" \
+  || { bad "погода ушла в LLM вместо плагина: $(echo "$r" | head -c 60)"; fails=1; }
+
+avail=$(free -m | awk '/^Mem:/{print $7}')
+[ "${avail:-0}" -ge 800 ] \
+  && ok "свободной памяти ${avail} МБ" \
+  || { bad "свободно только ${avail} МБ — контейнер может зависнуть снова"; fails=1; }
 
 errs=$(docker logs "$CONTAINER" --since 3m 2>&1 \
        | grep -c 'Ошибка инициализации плагина' || true)
