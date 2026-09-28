@@ -1,635 +1,563 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="ru" data-theme="dark">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Дженет — Умная колонка</title>
-  <style>
-    * { box-sizing: border-box; }
-    :root {
-      --bg: #000000;
-      --panel: #0b0b0d;
-      --card: #111114;
-      --chat: #080809;
-      --border: #25252b;
-      --text: #f2f2f2;
-      --muted: #9a9aa3;
-      --blue: #3b82f6;
-      --red: #ef4444;
-      --green: #10b981;
-    }
-    html[data-theme="light"] {
-      --bg: #f8fafc;
-      --panel: #f1f5f9;
-      --card: #ffffff;
-      --chat: #f8fafc;
-      --border: #e2e8f0;
-      --text: #0f172a;
-      --muted: #64748b;
-      --blue: #2563eb;
-      --red: #dc2626;
-      --green: #059669;
-    }
-    body {
-      margin: 0; font-family: system-ui, -apple-system, sans-serif;
-      background: var(--bg); color: var(--text);
-      min-height: 100vh; display: flex; flex-direction: column;
-    }
-    .main-wrapper {
-      display: flex; flex: 1;
-      width: 100%; max-width: 1200px; margin: 0 auto;
-    }
-    .left-panel {
-      flex: 1; min-width: 0; padding: 1rem;
-      display: flex; flex-direction: column;
-    }
-    .right-panel {
-      width: 320px; min-width: 280px; max-width: 400px;
-      border-left: 1px solid var(--border);
-      background: var(--panel);
-      padding: 1rem;
-      display: flex; flex-direction: column;
-    }
-    @media (max-width: 900px) {
-      .main-wrapper { flex-direction: column; }
-      .right-panel { width: 100%; border-left: none; border-top: 1px solid var(--border); }
-    }
-    h1 { font-size: 1.5rem; margin: 0.5rem 0; text-align: center; }
-    .status { text-align: center; font-size: 0.9rem; color: var(--muted); margin-bottom: 1rem; min-height: 1.2em; }
-    .card {
-      background: var(--card); border-radius: 12px; padding: 1rem;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.3);
-      margin-bottom: 1rem;
-    }
-    .btn {
-      width: 100%; padding: 0.875rem; font-size: 1rem; font-weight: 600;
-      border: none; border-radius: 8px; cursor: pointer; transition: opacity 0.15s;
-    }
-    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    .btn-primary { background: var(--blue); color: #fff; }
-    .btn-danger { background: var(--red); color: #fff; }
-    .btn-voice { background: var(--red); color: #fff; }
-    .btn-voice.voice-active { background: #991b1b; animation: pulse 1s infinite; }
-    .input-group { display: flex; gap: 0.5rem; }
-    .input-group input { flex: 1; padding: 0.75rem; font-size: 1rem; border: 1px solid var(--border); border-radius: 8px; background: var(--chat); color: var(--text); }
-    .input-group input::placeholder { color: #6b7280; }
-    .input-group input:focus { outline: none; border-color: var(--blue); }
-    .log {
-      flex: 1; overflow-y: auto; padding: 0.75rem;
-      background: var(--chat); border-radius: 8px; border: 1px solid var(--border);
-      font-family: ui-monospace, monospace; font-size: 0.875rem; line-height: 1.5;
-      max-height: 400px;
-    }
-    .msg { margin-bottom: 0.75rem; padding: 0.5rem; border-radius: 6px; }
-    .msg-user { background: var(--panel); color: var(--text); text-align: right; }
-    .msg-assistant { background: var(--chat); color: var(--text); }
-    .msg-error { background: var(--red); color: #fff; }
-    .msg-system { background: var(--chat); color: var(--muted); font-size: 0.8rem; text-align: center; }
-    .msg-meta { margin-top: 0.4rem; font-size: 0.7rem; color: rgba(255,255,255,0.55); text-align: right; font-family: ui-monospace, monospace; letter-spacing: 0.02em; }
-    .msg-meta::before { content: "⏱ "; opacity: 0.7; }
-    .mic-visualizer { display: flex; justify-content: center; gap: 3px; height: 40px; align-items: flex-end; margin: 1rem 0; }
-    .mic-bar { width: 8px; background: var(--blue); border-radius: 4px; transition: height 0.1s; }
-    .hidden { display: none !important; }
-    .spinner {
-      display: inline-block; width: 14px; height: 14px;
-      border: 2px solid var(--blue); border-top-color: transparent;
-      border-radius: 50%; animation: spin 0.8s linear infinite;
-      vertical-align: -2px; margin-right: 0.5rem;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Дженет</title>
+<style>
+  :root {
+    --bg: #0b0b0c;
+    --surface: #141416;
+    --surface-2: #1c1c1f;
+    --line: #26262a;
+    --ink: #ededf0;
+    --ink-dim: #8b8b93;
+    --ink-faint: #6a6a72;
+    --accent: #4a7dff;
+    --danger: #d34a4a;
+    --ok: #3a9a6b;
+  }
+  html[data-theme="light"] {
+    --bg: #ffffff;
+    --surface: #f7f7f8;
+    --surface-2: #eeeef0;
+    --line: #e3e3e6;
+    --ink: #17171a;
+    --ink-dim: #6c6c74;
+    --ink-faint: #9a9aa2;
+    --accent: #2f5fe0;
+    --danger: #c33a3a;
+    --ok: #2f7d57;
+  }
 
-    /* Right panel - thinking */
-    .thinking-panel { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-    .thinking-header {
-      font-weight: 600; margin-bottom: 0.5rem;
-      color: var(--text); display: flex; align-items: center; gap: 0.5rem;
-    }
-    .thinking-header::before { content: "🧠"; font-size: 1.1rem; }
-    .thinking-content {
-      flex: 1; overflow-y: auto; padding: 0.75rem;
-      background: var(--chat); border-radius: 8px; border: 1px solid var(--border);
-      font-family: ui-monospace, monospace; font-size: 0.875rem; line-height: 1.5;
-      color: #d1d5db; white-space: pre-wrap; word-wrap: break-word;
-    }
-    .thinking-placeholder { color: #6b7280; text-align: center; padding: 2rem; }
-    .tts-btn {
-      margin-top: 0.5rem; width: 100%; padding: 0.5rem; font-size: 0.9rem;
-      background: var(--green); color: #fff; border: none; border-radius: 8px; cursor: pointer;
-    }
-    .tts-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    .quick-btns { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem; }
-    .quick-btn { flex: 1 1 calc(25% - 0.5rem); min-width: 70px; padding: 0.35rem 0.25rem; font-size: 0.8rem; border-radius: 6px; border: none; background: var(--panel); color: var(--text); cursor: pointer; transition: background 0.15s; }
-    .quick-btn:hover { background: var(--blue); color: #fff; }
-    /* Plugin status */
-    .plugin-status { margin-top: 0.75rem; padding: 0.75rem; background: var(--panel); border-radius: 8px; border: 1px solid var(--border); }
-    .plugin-item { display: flex; align-items: center; gap: 0.5rem; padding: 0.35rem 0; border-bottom: 1px solid var(--border); font-size: 0.8rem; }
-    .plugin-item:last-child { border-bottom: none; }
-    .plugin-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-    .plugin-dot.active { background: var(--green); box-shadow: 0 0 4px var(--green); }
-    .plugin-dot.inactive { background: #6b7280; }
-    .plugin-name { font-weight: 600; color: var(--text); }
-    .plugin-desc { color: var(--muted); font-size: 0.75rem; margin-left: auto; }
-  </style>
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  button { font: inherit; color: inherit; cursor: pointer; }
+  input { font: inherit; }
+
+  /* ---------- shell ---------- */
+  .app { display: flex; height: 100%; }
+
+  .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+
+  .bar {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 20px; border-bottom: 1px solid var(--line);
+  }
+  .bar h1 { font-size: 15px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+  .bar .spacer { flex: 1; }
+  .linkish {
+    background: none; border: 1px solid var(--line); color: var(--ink-dim);
+    padding: 5px 10px; border-radius: 6px; font-size: 13px; transition: border-color .15s, color .15s;
+  }
+  .linkish:hover { border-color: var(--ink-faint); color: var(--ink); }
+  .linkish[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+  .status { font-size: 13px; color: var(--ink-faint); min-width: 74px; }
+
+  /* ---------- chat ---------- */
+  .chat { flex: 1; overflow-y: auto; padding: 20px; }
+  .thread { max-width: 720px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+
+  .row { display: flex; flex-direction: column; gap: 4px; }
+  .row.user { align-items: flex-end; }
+
+  .bubble {
+    max-width: 84%; padding: 9px 13px; border-radius: 6px;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .row.user .bubble { background: var(--surface-2); }
+  .row.bot  .bubble { background: none; padding: 0; max-width: 100%; }
+
+  .who { font-size: 12px; color: var(--ink-faint); }
+  /* время сообщения — видимое в обеих темах */
+  .stamp { font-size: 11.5px; color: var(--ink-faint); letter-spacing: .01em; }
+  .row.user .stamp { text-align: right; }
+
+  .row.err .bubble { color: var(--danger); }
+  .row.sys .bubble { color: var(--ink-faint); font-size: 13.5px; }
+
+  .empty { color: var(--ink-faint); font-size: 13.5px; text-align: center; padding: 40px 0; }
+
+  /* ---------- composer ---------- */
+  .composer { border-top: 1px solid var(--line); padding: 12px 20px 16px; }
+  .composer-in { max-width: 720px; margin: 0 auto; }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+  .chip {
+    background: var(--surface); border: 1px solid var(--line); color: var(--ink-dim);
+    padding: 5px 11px; border-radius: 6px; font-size: 13px; transition: border-color .15s, color .15s;
+  }
+  .chip:hover { border-color: var(--ink-faint); color: var(--ink); }
+
+  .field { display: flex; gap: 8px; align-items: flex-end; }
+  .field textarea {
+    flex: 1; resize: none; background: var(--surface); color: var(--ink);
+    border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px;
+    min-height: 44px; max-height: 160px; line-height: 1.5;
+  }
+  .field textarea:focus { outline: none; border-color: var(--ink-faint); }
+  .field textarea::placeholder { color: var(--ink-faint); }
+
+  .send {
+    background: var(--accent); color: #fff; border: none; border-radius: 6px;
+    padding: 11px 18px; font-weight: 500; transition: opacity .15s;
+  }
+  .send:disabled { opacity: .4; cursor: default; }
+
+  .microw { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+  .mic { background: var(--surface); border: 1px solid var(--line); padding: 6px 12px; border-radius: 6px; font-size: 13px; }
+  .mic[data-on="true"] { border-color: var(--danger); color: var(--danger); }
+  .meter { display: flex; align-items: flex-end; gap: 2px; height: 18px; }
+  .meter i { width: 3px; background: var(--accent); height: 2px; transition: height .08s linear; }
+
+  /* ---------- side ---------- */
+  .side {
+    width: 300px; flex-shrink: 0; border-left: 1px solid var(--line);
+    display: flex; flex-direction: column; overflow-y: auto;
+  }
+  .side section { padding: 14px 16px; border-bottom: 1px solid var(--line); }
+  .side h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--ink-faint); margin: 0 0 10px; font-weight: 600;
+  }
+  .reason { font-size: 13.5px; color: var(--ink-dim); white-space: pre-wrap; word-break: break-word; min-height: 60px; }
+
+  .pl { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 13px; cursor: pointer; }
+  .pl + .pl { border-top: 1px solid var(--line); }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ink-faint); flex-shrink: 0; }
+  .dot.on { background: var(--ok); }
+  .pl span:first-of-type { color: var(--ink); }
+  .pl small { color: var(--ink-faint); margin-left: auto; text-align: right; }
+
+  .who-btn { margin: 0 4px 4px 0; }
+  .tts { width: 100%; margin-top: 8px; background: var(--surface-2); border: 1px solid var(--line); padding: 7px; border-radius: 6px; font-size: 13px; }
+  .hidden { display: none !important; }
+
+  .busy { display: inline-block; width: 11px; height: 11px; border: 1.5px solid var(--ink-faint);
+          border-top-color: transparent; border-radius: 50%; animation: spin .7s linear infinite;
+          vertical-align: -1px; margin-right: 6px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  @media (max-width: 860px) {
+    .side { display: none; }
+    .side.open { display: flex; position: fixed; inset: 0 0 0 auto; width: 300px; background: var(--bg); z-index: 10; }
+  }
+</style>
 </head>
 <body>
-  <div class="main-wrapper">
-    <div class="left-panel">
+<div class="app">
+  <main class="main">
+    <header class="bar">
       <h1>Дженет</h1>
-      <div class="status" id="status">Готов</div>
-      <button class="btn" id="themeToggle" onclick="toggleTheme()" style="margin: 0.5rem 0; padding: 0.5rem; font-size: 0.8rem;">🌙 Тема</button>
+      <span class="status" id="status">Готова</span>
+      <span class="spacer"></span>
+      <button class="linkish" id="sideToggle" aria-pressed="false">Панель</button>
+      <button class="linkish" id="themeBtn" aria-pressed="false">Светлая</button>
+    </header>
 
-      <div class="card">
-        <div class="input-group">
-          <input type="text" id="textInput" placeholder="Напишите команду (например: привет)...">
-          <button class="btn btn-primary" id="sendText">Отправить</button>
-        </div>
-      </div>
-
-      <div class="card">
-        <button class="btn btn-voice" id="micBtn">🎤 Начать слушать</button>
-        <button class="btn btn-danger hidden" id="stopBtn">⏹ Остановить</button>
-        <div class="mic-visualizer hidden" id="visualizer">
-          <div class="mic-bar" style="height: 10%"></div>
-          <div class="mic-bar" style="height: 30%"></div>
-          <div class="mic-bar" style="height: 50%"></div>
-          <div class="mic-bar" style="height: 30%"></div>
-          <div class="mic-bar" style="height: 10%"></div>
-        </div>
-      </div>
-
-      <div class="card" style="margin-top:0.75rem;">
-        <div class="quick-btns">
-          <button class="quick-btn" onclick="sendQuick('погода')">🌤 Погода</button>
-          <button class="quick-btn" onclick="sendQuick('время')">🕐 Время</button>
-          <button class="quick-btn" onclick="sendQuick('привет')">👋 Привет</button>
-          <button class="quick-btn" onclick="sendQuick('пауза')">⏸ Пауза</button>
-        </div>
-      </div>
-
-      <div class="card" style="margin-top:0.75rem;">
-        <div class="quick-btns">
-          <button class="quick-btn" onclick="startVoiceEnroll()">🎤 Записать голос</button>
-          <button class="quick-btn" onclick="exportSession()">💾 Сохранить диалог</button>
-        </div>
-      </div>
-
-      <div class="card" style="flex: 1; display: flex; flex-direction: column;">
-        <div class="log" id="log"></div>
+    <div class="chat" id="chat">
+      <div class="thread" id="thread">
+        <div class="empty" id="empty">Напишите команду или нажмите одну из кнопок ниже.</div>
       </div>
     </div>
 
-    <div class="right-panel">
-      <div class="thinking-panel" id="thinkingPanel">
-        <div class="thinking-header">🧠 Рассуждение нейросети</div>
-        <div class="thinking-content" id="thinking">
-          <div class="thinking-placeholder">Ожидание запроса...</div>
+    <div class="composer">
+      <div class="composer-in">
+        <div class="microw">
+          <button class="mic" id="micBtn" data-on="false">Микрофон</button>
+          <div class="meter" id="meter" hidden><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+          <span class="stamp" id="heard"></span>
         </div>
-        <button class="tts-btn hidden" id="ttsBtn" onclick="playTTS()">🔊 Озвучить ответ</button>
-      </div>
-      <!-- Plugin status -->
-      <div class="plugin-status" id="pluginStatusPanel">
-        <div class="plugin-section-title">🔌 Статус плагинов</div>
-        <div id="pluginList"></div>
+        <div class="chips" id="chips"></div>
+        <div class="field">
+          <textarea id="input" rows="1" placeholder="Написать сообщение…"></textarea>
+          <button class="send" id="send">Отправить</button>
+        </div>
       </div>
     </div>
-  </div>
+  </main>
+
+  <aside class="side" id="side">
+    <section>
+      <h2>Рассуждение</h2>
+      <div class="reason" id="reason">—</div>
+      <button class="tts hidden" id="ttsBtn">Озвучить ответ</button>
+    </section>
+    <section>
+      <h2>Говорящий</h2>
+      <div id="who"></div>
+    </section>
+    <section>
+      <h2>Плагины</h2>
+      <div id="plugins"></div>
+    </section>
+    <section>
+      <h2>Диалог</h2>
+      <div class="chips" style="margin:0">
+        <button class="chip" id="enrollBtn">Записать голос</button>
+        <button class="chip" id="saveBtn">Сохранить</button>
+      </div>
+    </section>
+  </aside>
+</div>
 
 <script>
-const API_BASE = '/kolonka';
-const MODEL_NAME = 'qwen2.5:0.5b-instruct';
+"use strict";
+const API = "/kolonka";
+const NAME = "дженет";
 
 const $ = (id) => document.getElementById(id);
-const log = $('log');
-const statusEl = $('status');
-const thinkingEl = $('thinking');
-const ttsBtn = $('ttsBtn');
+const thread = $("thread"), empty = $("empty"), chat = $("chat");
+const statusEl = $("status"), reasonEl = $("reason"), heard = $("heard");
 
-let lastAnswer = '';
-let lastModel = MODEL_NAME;
-let lastSentAt = null;
-let thinkingDirty = false;
-let thinkingText = '';
-let thinkingUpdateTimer = null;
-
-function formatTime(date) {
-    return date.toLocaleTimeString('ru-RU', {hour: '2-digit', minute:'2-digit'});
-}
-
-function addMsg(text, type = 'system', metaOverride = null) {
-    const div = document.createElement('div');
-    div.className = 'msg msg-' + type;
-    const body = document.createElement('div');
-    body.textContent = text;
-    div.appendChild(body);
-    const meta = document.createElement('div');
-    meta.className = 'msg-meta';
-    const now = new Date();
-    const timeStr = now.toLocaleTimeString('ru-RU', {hour: '2-digit', minute:'2-digit'});
-    meta.textContent = metaOverride || `[${timeStr}] ${MODEL_NAME}`;
-    div.appendChild(meta);
-    log.appendChild(div);
-    log.scrollTop = log.scrollHeight;
-}
-
-function setStatus(text) { statusEl.textContent = text; }
-
-function showThinking(text) {
-  thinkingEl.innerHTML = '<span class="spinner"></span> ' + (text || 'Обработка запроса...');
-  setStatus('Думает...');
-}
-
-function hideThinking() {
-  thinkingEl.innerHTML = '<div class="thinking-placeholder">Завершено. Ожидание следующего запроса...</div>';
-  setStatus('Готов');
-}
-
-// Update thinking panel (called every 10 s from streaming)
-function updateThinkingDisplay() {
-  if (!thinkingText) return;
-  thinkingEl.textContent = thinkingText;
-  thinkingDirty = false;
-}
-
-// Flush thinking panel on finish
-function flushThinking() {
-  if (thinkingUpdateTimer) { clearInterval(thinkingUpdateTimer); thinkingUpdateTimer = null; }
-  if (thinkingText) {
-    thinkingEl.textContent = thinkingText;
-  } else {
-    thinkingEl.innerHTML = '<div class="thinking-placeholder">Рассуждений нет</div>';
-  }
-  thinkingDirty = false;
-  // Add reasoning timestamp when reasoning is finished
-  if (thinkingText && lastSentAt) {
-    const now = new Date();
-    const timeStr = now.toLocaleTimeString('ru-RU', {hour: '2-digit', minute:'2-digit'});
-    thinkingEl.innerHTML += `<div class="msg-meta" style="margin-top:0.5rem; text-align:right; opacity:0.6; font-size:0.75rem;">⏱ Рассуждение завершено в ${timeStr}</div>`;
-  }
-}
-
-function showTTSButton(show) {
-  ttsBtn.classList.toggle('hidden', !show);
-}
-
-// TTS: play answer audio using browser Web Speech API (no backend needed)
-async function playTTS() {
-  if (!lastAnswer) return;
-  try {
-    if ('speechSynthesis' in window) {
-      const utter = new SpeechSynthesisUtterance(lastAnswer);
-      utter.lang = 'ru-RU';
-      utter.rate = 1.0;
-      window.speechSynthesis.speak(utter);
-    } else {
-      addMsg('TTS не поддерживается в этом браузере', 'error');
-    }
-  } catch (e) {
-    addMsg('TTS ошибка: ' + e.message, 'error');
-  }
-}
-
-// Main command: streaming from Ollama with thinking updates
-async function sendCommand(cmd, useRaw = false) {
-    const normalizedCmd = cmd.toLowerCase();
-    const sentAt = new Date();
-    lastSentAt = sentAt;
-    addMsg(cmd, 'user', `Отправлено: ${formatTime(sentAt)}`);
-    showThinking('Запрос отправлен...');
-    lastAnswer = '';
-    lastModel = MODEL_NAME;
-    thinkingText = '';
-    thinkingDirty = false;
-    showTTSButton(false);
-
-    // Start 10-second thinking display update
-    thinkingUpdateTimer = setInterval(() => {
-        if (thinkingDirty) updateThinkingDisplay();
-    }, 10000);
-
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 300000);
-    try {
-        const endpoint = useRaw ? '/sendRawTxt' : '/sendTxtCmd';
-        const param = useRaw ? 'rawtxt' : 'cmd';
-        
-        // Use non-streaming endpoint (streaming hangs on container, fallback works)
-        const url = API_BASE + endpoint + '?' + param + '=' + encodeURIComponent(normalizedCmd);
-        const res = await fetch(url, { signal: controller.signal });
-        if (!res.ok) {
-            addMsg('Ошибка сервера: ' + res.status, 'error');
-            setStatus('Ошибка сервера');
-        } else {
-            const data = await res.json();
-            if (data.response || data.restxt) { lastAnswer = data.response || data.restxt; }
-            if (data.thinking) { thinkingText = data.thinking; }
-            if (data.model) lastModel = data.model;
-            if (data.error) { addMsg('Ошибка: ' + data.error, 'error'); }
-        }
-    } catch (e) {
-        if (e.name === 'AbortError') {
-            addMsg('Таймаут: запрос обрабатывается слишком долго (300 с)', 'error');
-            setStatus('Таймаут');
-        } else {
-            addMsg('Сеть: ' + e.message, 'error');
-            setStatus('Ошибка сети');
-        }
-    } finally {
-        clearTimeout(timeoutId);
-        if (thinkingUpdateTimer) { clearInterval(thinkingUpdateTimer); thinkingUpdateTimer = null; }
-        flushThinking();
-        if (lastAnswer) {
-            const meta = `Отправка: ${formatTime(lastSentAt)} → Ответ: ${formatTime(new Date())} · ${lastModel}`;
-            addMsg(lastAnswer, 'assistant', meta);
-            setStatus('Готов');
-            showTTSButton(true);
-        }
-    }
-}
-
-// ===== TEXT INPUT =====
-function sendQuick(cmd) {
-  $('textInput').value = cmd;
-  sendCommand(cmd);
-}
-
-$('sendText').onclick = () => {
-  const v = $('textInput').value.trim();
-  if (v) { $('textInput').value = ''; sendCommand(v); }
+const state = {
+  last: "", lastAt: null, source: null,
+  listening: false, busy: false,
+  rec: null, chunks: [], micStream: null, audioCtx: null, analyser: null, raf: 0,
+  speaker: "anton",
 };
-$('textInput').onkeydown = (e) => { if (e.key === 'Enter') $('sendText').click(); };
 
-// Theme toggle
-function initTheme() {
-  const saved = localStorage.getItem('kolonka_theme') || 'dark';
-  document.documentElement.setAttribute('data-theme', saved);
-  $('themeToggle').textContent = saved === 'dark' ? '☀️ Тема' : '🌙 Тема';
+/* ---------- themes ---------- */
+function applyTheme(t) {
+  document.documentElement.setAttribute("data-theme", t);
+  $("themeBtn").textContent = t === "dark" ? "Светлая" : "Тёмная";
+  $("themeBtn").setAttribute("aria-pressed", String(t === "light"));
+  try { localStorage.setItem("dzh_theme", t); } catch (e) {}
 }
-function toggleTheme() {
-  const current = document.documentElement.getAttribute('data-theme') || 'dark';
-  const next = current === 'dark' ? 'light' : 'dark';
-  document.documentElement.setAttribute('data-theme', next);
-  localStorage.setItem('kolonka_theme', next);
-  $('themeToggle').textContent = next === 'dark' ? '☀️ Тема' : '🌙 Тема';
-}
+$("themeBtn").onclick = () =>
+  applyTheme(document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark");
 
-// ===== WEB SPEECH API (native browser STT) =====
-let recognition = null;
-let isListening = false;
-let wasFinal = false;
-let finalTranscript = '';
-let visAnim = null;
+$("sideToggle").onclick = (e) => {
+  const open = $("side").classList.toggle("open");
+  e.currentTarget.setAttribute("aria-pressed", String(open));
+};
 
-function initRecognition() {
-  if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
-    addMsg('Web Speech API не поддерживается в этом браузере', 'error');
-    $('micBtn').disabled = true;
-    return false;
+/* ---------- chat rendering ---------- */
+const hhmm = (d) => d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+
+function addMsg(text, who, opts) {
+  opts = opts || {};
+  if (empty) empty.remove();
+  const row = document.createElement("div");
+  row.className = "row " + (who === "user" ? "user" : who === "error" ? "err" : who === "system" ? "sys" : "bot");
+
+  if (who === "bot" || who === "user") {
+    const who_ = document.createElement("div");
+    who_.className = "who";
+    who_.textContent = who === "user" ? speakerName(state.speaker) : NAME[0].toUpperCase() + NAME.slice(1);
+    row.appendChild(who_);
   }
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  recognition = new SR();
-  recognition.lang = 'ru-RU';
-  recognition.interimResults = true;
-  recognition.continuous = false;
-  recognition.maxAlternatives = 1;
 
-  recognition.onstart = () => {
-    isListening = true;
-    $('micBtn').classList.add('voice-active');
-    $('micBtn').textContent = '🎤 Слушаю...';
-    $('stopBtn').classList.remove('hidden');
-    $('visualizer').classList.remove('hidden');
-    setStatus('Слушаю...');
-    animateVisualizer(true);
+  const b = document.createElement("div");
+  b.className = "bubble";
+  b.textContent = text;
+  row.appendChild(b);
+
+  const stamp = document.createElement("div");
+  stamp.className = "stamp";
+  const now = new Date();
+  let label = hhmm(opts.at || now);
+  if (who === "bot" && state.lastAt) label = hhmm(state.lastAt) + " → " + label;
+  if (opts.source) label += " · " + opts.source;
+  stamp.textContent = label;
+  row.appendChild(stamp);
+
+  thread.appendChild(row);
+  chat.scrollTop = chat.scrollHeight;
+  return row;
+}
+
+/* ---------- speakers ---------- */
+const SPEAKERS = { anton: "Антон", sob1: "Собеседник 1", sob2: "Собеседник 2" };
+const speakerName = (id) => SPEAKERS[id] || id;
+function renderWho() {
+  const box = $("who");
+  box.innerHTML = "";
+  Object.keys(SPEAKERS).forEach((id) => {
+    const b = document.createElement("button");
+    b.className = "chip who-btn";
+    b.textContent = SPEAKERS[id];
+    b.setAttribute("aria-pressed", String(id === state.speaker));
+    if (id === state.speaker) b.style.borderColor = "var(--accent)", b.style.color = "var(--accent)";
+    b.onclick = () => { state.speaker = id; renderWho(); };
+    box.appendChild(b);
+  });
+}
+
+/* ---------- plugins ---------- */
+const PLUGINS = [
+  ["plugin_greetings", "Приветствие", "привет"],
+  ["plugin_datetime", "Дата и время", "дата"],
+  ["plugin_weather_wttr", "Погода", "погода"],
+  ["plugin_random", "Кубик", "брось"],
+  ["plugin_timer", "Таймер", "таймер"],
+];
+const readState = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) || d; } catch (e) { return d; } };
+const writeState = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
+
+function renderPlugins() {
+  const box = $("plugins");
+  const st = readState("dzh_plugins", {});
+  box.innerHTML = "";
+  PLUGINS.forEach(([id, title, cmd]) => {
+    const on = st[id] !== undefined ? st[id] : id === "plugin_greetings";
+    const row = document.createElement("div");
+    row.className = "pl";
+    row.innerHTML = '<span class="dot ' + (on ? "on" : "") + '"></span>' +
+                    "<span>" + title + "</span><small>" + (on ? "вкл" : "выкл") + "</small>";
+    row.onclick = () => { st[id] = !on; writeState("dzh_plugins", st); renderPlugins(); };
+    row.oncontextmenu = (e) => { e.preventDefault(); ask(cmd); };
+    box.appendChild(row);
+  });
+}
+
+/* ---------- quick chips ---------- */
+const QUICK = ["привет", "время", "дата", "погода", "брось кубик", "таймер 5 минут"];
+$("chips").innerHTML = "";
+QUICK.forEach((c) => {
+  const b = document.createElement("button");
+  b.className = "chip";
+  b.textContent = c;
+  b.onclick = () => ask(c);
+  $("chips").appendChild(b);
+});
+
+/* ---------- sending ---------- */
+function setStatus(t) { statusEl.textContent = t; }
+
+async function ask(cmd) {
+  const text = (cmd || $("input").value).trim();
+  if (!text || state.busy) return;
+  $("input").value = "";
+  $("input").style.height = "auto";
+  state.busy = true;
+  state.lastAt = new Date();
+  addMsg(text, "user", { at: state.lastAt });
+  setStatus("Думаю");
+
+  const live = addMsg("", "bot");
+  const bubble = live.querySelector(".bubble");
+  const stamp = live.querySelector(".stamp");
+  let out = "", thinking = "", answered = false;
+
+  const finish = (src) => {
+    state.busy = false;
+    $("send").disabled = false;
+    setStatus("Готова");
+    if (!out) { live.remove(); return; }
+    bubble.textContent = out;
+    stamp.textContent = (state.lastAt ? hhmm(state.lastAt) + " → " : "") + hhmm(new Date()) + (src ? " · " + src : "");
+    state.last = out;
+    $("ttsBtn").classList.remove("hidden");
   };
 
-  recognition.onend = () => {
-    isListening = false;
-    $('micBtn').classList.remove('voice-active');
-    $('micBtn').textContent = '🎤 Начать слушать';
-    $('stopBtn').classList.add('hidden');
-    $('visualizer').classList.add('hidden');
-    stopVisualizer();
-    if (finalTranscript.trim()) {
-      sendCommand(finalTranscript.trim());
-    } else {
-      setStatus('Готов');
-    }
+  const draw = () => {
+    bubble.textContent = out || "…";
+    reasonEl.textContent = thinking || "—";
+    chat.scrollTop = chat.scrollHeight;
   };
 
-  recognition.onresult = (e) => {
-    let interim = '';
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      if (e.results[i].isFinal) {
-        finalTranscript += e.results[i][0].transcript;
-        wasFinal = true;
-      } else {
-        interim += e.results[i][0].transcript;
+  try {
+    const res = await fetch(API + "/sendTxtCmdStream?cmd=" + encodeURIComponent(text.toLowerCase()));
+    if (!res.ok || !res.body) throw new Error("HTTP " + res.status);
+
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const parts = buf.split("\n\n");
+      buf = parts.pop();
+      for (const chunk of parts) {
+        const m = chunk.match(/^data:\s*(.*)$/s);
+        if (!m) continue;
+        if (m[1].trim() === "[DONE]") continue;
+        let d;
+        try { d = JSON.parse(m[1]); } catch (e) { continue; }
+        if (d.error) { addMsg("Ошибка: " + d.error, "error"); finish(null); return; }
+        if (d.thinking) thinking = d.thinking;
+        if (d.response) { out = d.response; answered = true; }
+        if (d.source) state.source = d.source;
+        draw();
       }
     }
-    setStatus(interim || finalTranscript || 'Слушаю...');
-  };
-
-  recognition.onerror = (e) => {
-    if (e.error === 'not-allowed') {
-      addMsg('Микрофон запрещён браузером. Разрешите доступ к микрофону или используйте текстовый ввод.', 'error');
-    } else {
-      addMsg('STT ошибка: ' + e.error, 'error');
-    }
-    setStatus('Готов');
-  };
-
-  return true;
-}
-
-function animateVisualizer(on) {
-  const bars = document.querySelectorAll('.mic-bar');
-  if (on) {
-    if (!window.audioContext) {
-      window.audioContext = new (window.AudioContext || window.webkitAudioContext)();
-    }
-    if (!window.analyser) {
-      window.analyser = window.audioContext.createAnalyser();
-      window.analyser.fftSize = 256;
-      window.mediaStreamSource = window.audioContext.createMediaStreamSource(window.micStream);
-      window.mediaStreamSource.connect(window.analyser);
-    }
-    const bufferLength = window.analyser.frequencyBinCount;
-    const dataArray = new Uint8Array(bufferLength);
-    visAnim = requestAnimationFrame(function animate() {
-      window.analyser.getByteFrequencyData(dataArray);
-      const avg = dataArray.reduce((a, b) => a + b, 0) / bufferLength;
-      const height = Math.max(10, Math.min(100, (avg / 128) * 100));
-      bars.forEach((b, i) => {
-        b.style.height = (height * (0.5 + 0.5 * Math.random())) + '%';
-      });
-      if (window.isVisualizing) visAnim = requestAnimationFrame(animate);
-    });
-  } else {
-    if (visAnim) cancelAnimationFrame(visAnim);
-    visAnim = null;
-    bars.forEach(b => b.style.height = '10%');
-  }
-}
-function stopVisualizer() { animateVisualizer(false); }
-
-$('micBtn').onclick = async () => {
-  if (!recognition && !initRecognition()) return;
-  wasFinal = false;
-  finalTranscript = '';
-  try {
-    window.micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    recognition.start();
+    if (!answered) throw new Error("пустой ответ");
+    finish(state.source === "llm" ? "llm" : null);
   } catch (e) {
-    addMsg('Микрофон недоступен: ' + e.message, 'error');
+    // поток недоступен — обычный запрос
+    try {
+      const r = await fetch(API + "/sendTxtCmd?cmd=" + encodeURIComponent(text.toLowerCase()));
+      const d = await r.json();
+      if (d.error) { addMsg("Ошибка: " + d.error, "error"); finish(null); return; }
+      out = d.restxt || "";
+      state.source = d.source || "llm";
+      finish(state.source === "llm" ? "llm" : null);
+    } catch (e2) {
+      addMsg("Сеть недоступна: " + e2.message, "error");
+      live.remove();
+      state.busy = false;
+      $("send").disabled = false;
+      setStatus("Готова");
+    }
   }
+}
+
+$("send").onclick = () => ask();
+$("input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); ask(); }
+});
+$("input").addEventListener("input", (e) => {
+  e.target.style.height = "auto";
+  e.target.style.height = Math.min(160, e.target.scrollHeight) + "px";
+});
+
+/* ---------- speech out ---------- */
+$("ttsBtn").onclick = () => {
+  if (!state.last || !("speechSynthesis" in window)) return;
+  const u = new SpeechSynthesisUtterance(state.last);
+  u.lang = "ru-RU";
+  speechSynthesis.speak(u);
 };
 
-$('stopBtn').onclick = () => {
-  if (recognition && isListening) recognition.stop();
-};
+/* ---------- speech in + real level meter ---------- */
+let rec = null, finalText = "";
+function initRec() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { addMsg("Браузер не поддерживает распознавание речи — пишите текстом.", "system"); return null; }
+  rec = new SR();
+  rec.lang = "ru-RU";
+  rec.interimResults = true;
+  rec.continuous = false;
 
-// Plugin status data (from plugins_catalog.json)
-const PLUGIN_CATALOG = {"plugins":[{"name":"plugin_fuzzy_thefuzz","plugin_file_check":"plugin_fuzzy_thefuzz.py","url":"https://github.com/janvarev/irene_plugin_fuzzy_thefuzz","description":"Нечеткое распознавание команд через thefuzz","added":"2023-06-10"},{"name":"plugin_fuzzy_ai_sentence","plugin_file_check":"plugin_fuzzy_ai_sentence.py","url":"https://github.com/janvarev/irene_plugin_fuzzy_ai_sentence","description":"Нечеткое распознавание команд через ai sentence","added":"2023-06-10"},{"name":"plugin_boltalka_openai","plugin_file_check":"plugin_boltalka_openai.py","url":"https://github.com/janvarev/irene_plugin_boltalka_openai","description":"Болталка с OpenAI","added":"2023-05-10"},{"name":"plugin_boltalka2_openai","plugin_file_check":"plugin_boltalka2_openai.py","url":"https://github.com/janvarev/irene_plugin_boltalka2_openai","description":"Болталка с OpenAI v2","added":"2023-05-10"}]};
-
-function getPluginState() {
-  try {
-    return JSON.parse(localStorage.getItem('kolonka_plugin_status') || '{}');
-  } catch (e) {
-    return {};
-  }
+  rec.onstart = () => {
+    state.listening = true;
+    $("micBtn").dataset.on = "true";
+    $("micBtn").textContent = "Слушаю";
+    $("meter").hidden = false;
+    setStatus("Слушаю");
+    startMeter();
+  };
+  rec.onresult = (e) => {
+    let interim = "";
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const tr = e.results[i][0].transcript;
+      if (e.results[i].isFinal) finalText += tr; else interim += tr;
+    }
+    heard.textContent = interim || finalText;
+  };
+  rec.onerror = (e) => {
+    addMsg(e.error === "not-allowed" ? "Нет доступа к микрофону." : "Ошибка распознавания: " + e.error, "error");
+  };
+  rec.onend = () => {
+    state.listening = false;
+    $("micBtn").dataset.on = "false";
+    $("micBtn").textContent = "Микрофон";
+    $("meter").hidden = true;
+    stopMeter();
+    const said = finalText.trim();
+    heard.textContent = "";
+    finalText = "";
+    if (said) ask(said); else setStatus("Готова");
+  };
+  return rec;
 }
-function setPluginState(name, active) {
-  try {
-    const state = getPluginState();
-    state[name] = active;
-    localStorage.setItem('kolonka_plugin_status', JSON.stringify(state));
-  } catch (e) {}
-}
 
-function renderPluginStatus() {
-  const list = $('pluginList');
-  if (!list) return;
-  list.innerHTML = '';
-  const state = getPluginState();
-  PLUGIN_CATALOG.plugins.forEach(p => {
-    const active = state[p.name] !== undefined ? state[p.name] : (p.name === 'plugin_greetings' ? true : false);
-    const item = document.createElement('div');
-    item.className = 'plugin-item';
-    item.style.cursor = 'pointer';
-    item.onclick = () => {
-      const newActive = !active;
-      setPluginState(p.name, newActive);
-      renderPluginStatus();
+async function startMeter() {
+  try {
+    state.micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    state.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = state.audioCtx.createMediaStreamSource(state.micStream);
+    state.analyser = state.audioCtx.createAnalyser();
+    state.analyser.fftSize = 256;
+    src.connect(state.analyser);
+    const bars = $("meter").children;
+    const data = new Uint8Array(state.analyser.frequencyBinCount);
+    const tick = () => {
+      if (!state.listening) return;
+      state.analyser.getByteFrequencyData(data);
+      let sum = 0;
+      for (let i = 0; i < data.length; i++) sum += data[i];
+      const lvl = Math.min(1, (sum / data.length) / 110);
+      for (let i = 0; i < bars.length; i++) {
+        const spread = 0.45 + 0.55 * Math.abs(Math.sin((i + 1) / bars.length * Math.PI));
+        bars[i].style.height = Math.max(2, lvl * spread * 18) + "px";
+      }
+      state.raf = requestAnimationFrame(tick);
     };
-    item.innerHTML = `<span class="plugin-dot ${active ? 'active' : 'inactive'}"></span><span class="plugin-name">${p.name.replace('plugin_', '').replace('_', ' ')}</span><span class="plugin-desc">${p.description}</span>`;
-    list.appendChild(item);
-  });
+    tick();
+  } catch (e) { /* meter is optional */ }
+}
+function stopMeter() {
+  cancelAnimationFrame(state.raf);
+  if (state.micStream) state.micStream.getTracks().forEach((t) => t.stop());
+  if (state.audioCtx) state.audioCtx.close();
+  state.micStream = state.audioCtx = state.analyser = null;
+  for (const b of $("meter").children) b.style.height = "2px";
 }
 
-// Multi-speaker support
-const SPEAKER_PROFILES = {"profiles":{"anton":{"name":"Антон","enrollment_text":"Это Антон, мой голос. Я говорю эти слова для профиля голоса."},"sobesednik1":{"name":"Собеседник 1","enrollment_text":""},"sobesednik2":{"name":"Собеседник 2","enrollment_text":""}},"default_speaker":"anton","threshold":0.30};
-let currentSpeaker = 'anton';
+$("micBtn").onclick = () => {
+  if (state.listening) { if (rec) rec.stop(); return; }
+  if (!rec) rec = initRec();
+  if (rec) { finalText = ""; rec.start(); }
+};
 
-function getSpeakerName(id) {
-  if (SPEAKER_PROFILES.profiles[id]) return SPEAKER_PROFILES.profiles[id].name;
-  return id;
-}
-function setCurrentSpeaker(id) {
-  currentSpeaker = id;
-  console.log('Current speaker set to:', getSpeakerName(id));
-}
-
-// Voice enrollment (B)
-let mediaRecorder = null;
-let audioChunks = [];
-async function startVoiceEnroll() {
-  if (mediaRecorder && mediaRecorder.state === 'recording') {
-    mediaRecorder.stop();
-    return;
-  }
+/* ---------- voice enrollment ---------- */
+$("enrollBtn").onclick = async () => {
+  if (state.rec && state.rec.state === "recording") { state.rec.stop(); return; }
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    mediaRecorder = new MediaRecorder(stream);
-    audioChunks = [];
-    mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
-    mediaRecorder.onstop = () => {
-      const blob = new Blob(audioChunks, { type: 'audio/wav' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `enroll_${currentSpeaker}_${Date.now()}.wav`;
+    const mr = new MediaRecorder(stream);
+    state.chunks = [];
+    mr.ondataavailable = (e) => state.chunks.push(e.data);
+    mr.onstop = () => {
+      const blob = new Blob(state.chunks, { type: "audio/webm" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "voice_" + state.speaker + ".webm";
       a.click();
-      URL.revokeObjectURL(url);
-      stream.getTracks().forEach(t => t.stop());
-      addMsg(`Голос записан для ${getSpeakerName(currentSpeaker)} (${blob.size} байт). Поместите .wav в voice-notes/inbox/ для --enroll.`, 'system');
+      URL.revokeObjectURL(a.href);
+      stream.getTracks().forEach((t) => t.stop());
+      addMsg("Запись сохранена. Положи файл в voice-notes/inbox и запусти --enroll.", "system");
     };
-    mediaRecorder.start();
-    addMsg(`🎤 Запись голоса для ${getSpeakerName(currentSpeaker)}... Нажмите кнопку снова, чтобы остановить.`, 'system');
-  } catch (e) {
-    addMsg('Ошибка записи: ' + e.message, 'error');
-  }
-}
+    mr.start();
+    addMsg("Идёт запись. Нажми ещё раз, чтобы остановить.", "system");
+    state.rec = mr;
+  } catch (e) { addMsg("Микрофон недоступен: " + e.message, "error"); }
+};
 
-// Export session (C)
-function exportSession() {
-  const entries = Array.from($('log').children);
-  if (!entries.length) { addMsg('Диалог пуст.', 'system'); return; }
-  const lines = ['# Диалог с колонкой', '', `Экспорт: ${new Date().toLocaleString('ru-RU')}`, ''];
-  entries.forEach(el => {
-    const text = el.querySelector('div')?.textContent || '';
-    const meta = el.querySelector('.msg-meta')?.textContent || '';
-    const type = el.classList.contains('msg-user') ? 'Вы' : (el.classList.contains('msg-assistant') ? 'Колонка' : 'Система');
-    lines.push(`## ${type} ${meta ? `(${meta})` : ''}`);
-    lines.push(text);
-    lines.push('');
+/* ---------- save transcript ---------- */
+$("saveBtn").onclick = () => {
+  const rows = thread.querySelectorAll(".row");
+  if (!rows.length) { addMsg("Диалог пуст.", "system"); return; }
+  const lines = ["# Дженет", "", "Экспорт: " + new Date().toLocaleString("ru-RU"), ""];
+  rows.forEach((r) => {
+    const who = r.classList.contains("user") ? "Я" : r.classList.contains("bot") ? "Дженет" : "Система";
+    lines.push("**" + who + "** · " + r.querySelector(".stamp").textContent);
+    lines.push(r.querySelector(".bubble").textContent);
+    lines.push("");
   });
-  const blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `dialog_${new Date().toISOString().slice(0,19).replace(':','-')}.md`;
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/markdown" }));
+  a.download = "djenet_" + new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-") + ".md";
   a.click();
-  URL.revokeObjectURL(url);
-  addMsg('Диалог экспортирован в .md', 'system');
-}
+  URL.revokeObjectURL(a.href);
+};
 
-// Speaker selection for multi-speaker mode (D)
-function renderSpeakerSelect() {
-  const container = $('speakerSelect');
-  if (!container) return;
-  container.innerHTML = '';
-  Object.keys(SPEAKER_PROFILES.profiles).forEach(id => {
-    const btn = document.createElement('button');
-    btn.className = 'quick-btn' + (id === currentSpeaker ? ' active' : '');
-    btn.style.margin = '2px';
-    btn.textContent = getSpeakerName(id);
-    btn.onclick = () => { setCurrentSpeaker(id); renderSpeakerSelect(); };
-    container.appendChild(btn);
-  });
-}
-
-// Add speaker selector to right panel
-function initSpeakerUI() {
-  const panel = $('thinkingPanel');
-  if (!panel) return;
-  const sel = document.createElement('div');
-  sel.id = 'speakerSelect';
-  sel.style.marginTop = '0.5rem';
-  sel.style.padding = '0.5rem';
-  sel.style.background = 'var(--card)';
-  sel.style.borderRadius = '8px';
-  sel.style.border = '1px solid var(--border)';
-  sel.innerHTML = '<div style="font-weight:600;margin-bottom:0.3rem;font-size:0.8rem;">👥 Говорящий:</div>';
-  panel.appendChild(sel);
-  renderSpeakerSelect();
-}
-
-// Init
-initTheme();
-initRecognition();
-renderPluginStatus();
-initSpeakerUI();
+/* ---------- boot ---------- */
+applyTheme((() => { try { return localStorage.getItem("dzh_theme") || "dark"; } catch (e) { return "dark"; } })());
+renderWho();
+renderPlugins();
+setStatus("Готова");
 </script>
 </body>
 </html>
