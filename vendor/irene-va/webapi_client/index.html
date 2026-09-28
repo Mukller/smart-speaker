@@ -3,6 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- пустая data-иконка: иначе браузер шлет запрос /favicon.ico и получает 404 -->
+<link rel="icon" href="data:,">
 <title>Дженет</title>
 <style>
   :root {
@@ -11,8 +13,10 @@
     --surface-2: #1c1c1f;
     --line: #26262a;
     --ink: #ededf0;
-    --ink-dim: #8b8b93;
-    --ink-faint: #6a6a72;
+    --ink-dim: #a5a5ad;
+    /* время сообщений и подписи заголовков: было #6a6a72 = 3.7:1, что ниже
+       порога WCAG AA 4.5:1 для мелкого текста и выглядело «едва видно» */
+    --ink-faint: #8f8f98;   /* 6.1:1 на #0b0b0c */
     --accent: #4a7dff;
     --danger: #d34a4a;
     --ok: #3a9a6b;
@@ -23,8 +27,9 @@
     --surface-2: #eeeef0;
     --line: #e3e3e6;
     --ink: #17171a;
-    --ink-dim: #6c6c74;
-    --ink-faint: #9a9aa2;
+    --ink-dim: #4a4a52;
+    /* было #9a9aa2 = 2.8:1 на белом — время сообщений почти не читалось */
+    --ink-faint: #6f6f78;   /* 5.0:1 на #ffffff */
     --accent: #2f5fe0;
     --danger: #c33a3a;
     --ok: #2f7d57;
@@ -76,9 +81,12 @@
   .row.bot  .bubble { background: none; padding: 0; max-width: 100%; }
 
   .who { font-size: 12px; color: var(--ink-faint); }
-  /* время сообщения — видимое в обеих темах */
-  .stamp { font-size: 11.5px; color: var(--ink-faint); letter-spacing: .01em; }
+  /* время сообщения: контраст 6.1:1 в тёмной и 5.0:1 в светлой теме */
+  .stamp { font-size: 12px; color: var(--ink-faint); letter-spacing: .01em; }
   .row.user .stamp { text-align: right; }
+  /* заглушка «печатает…»: без метки времени, пока ответа нет */
+  .row.bot.pending .stamp { visibility: hidden; }
+  .row.bot.pending .bubble { color: var(--ink-faint); }
 
   .row.err .bubble { color: var(--danger); }
   .row.sys .bubble { color: var(--ink-faint); font-size: 13.5px; }
@@ -123,6 +131,9 @@
     display: flex; flex-direction: column; overflow-y: auto;
   }
   .side section { padding: 14px 16px; border-bottom: 1px solid var(--line); }
+  /* последняя секция без рамки: под ней пустое поле, висящая линия
+     выглядела бы как недоделанный макет */
+  .side section:last-child { border-bottom: none; }
   .side h2 {
     font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
     color: var(--ink-faint); margin: 0 0 10px; font-weight: 600;
@@ -222,6 +233,7 @@ const state = {
   listening: false, busy: false,
   rec: null, chunks: [], micStream: null, audioCtx: null, analyser: null, raf: 0,
   speaker: "anton",
+  busyHint: 0,
 };
 
 /* ---------- themes ---------- */
@@ -269,6 +281,7 @@ function addMsg(text, who, opts) {
   stamp.textContent = label;
   row.appendChild(stamp);
 
+  if (opts.pending) row.classList.add("pending");
   thread.appendChild(row);
   chat.scrollTop = chat.scrollHeight;
   return row;
@@ -334,15 +347,25 @@ function setStatus(t) { statusEl.textContent = t; }
 
 async function ask(cmd) {
   const text = (cmd || $("input").value).trim();
-  if (!text || state.busy) return;
+  if (!text) return;
+  if (state.busy) {
+    // раньше ввод просто проглатывался: текст оставался в поле, кнопка
+    // выглядела активной, а ничего не происходило
+    setStatus("Дженет занята, подождите ответа");
+    $("input").focus();
+    clearTimeout(state.busyHint);
+    state.busyHint = setTimeout(() => { if (!state.busy) setStatus("Готова"); }, 1600);
+    return;
+  }
   $("input").value = "";
   $("input").style.height = "auto";
   state.busy = true;
   state.lastAt = new Date();
   addMsg(text, "user", { at: state.lastAt });
   setStatus("Думаю");
+  $("send").disabled = true;
 
-  const live = addMsg("", "bot");
+  const live = addMsg("…", "bot", { pending: true });
   const bubble = live.querySelector(".bubble");
   const stamp = live.querySelector(".stamp");
   let out = "", thinking = "", answered = false;
@@ -352,6 +375,7 @@ async function ask(cmd) {
     $("send").disabled = false;
     setStatus("Готова");
     if (!out) { live.remove(); return; }
+    live.classList.remove("pending");
     bubble.textContent = out;
     stamp.textContent = (state.lastAt ? hhmm(state.lastAt) + " → " : "") + hhmm(new Date()) + (src ? " · " + src : "");
     state.last = out;
@@ -359,6 +383,7 @@ async function ask(cmd) {
   };
 
   const draw = () => {
+    if (out) live.classList.remove("pending");
     bubble.textContent = out || "…";
     reasonEl.textContent = thinking || "—";
     chat.scrollTop = chat.scrollHeight;
