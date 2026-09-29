@@ -3,7 +3,7 @@
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 import uvicorn
 from multiprocessing import Process
 import os
@@ -452,6 +452,92 @@ async def ttsHealth():
     return {"ready": _tts["loaded"], "model": TTS_MODEL_DIR,
             "error": _tts["err"],
             "present": os.path.isdir(TTS_MODEL_DIR)}
+
+
+# ---------------------------------------------------------------------------
+# Распознавание речи на сервере (vosk).
+#
+# Раньше микрофон работал только через браузерный SpeechRecognition: он есть
+# лишь в Chrome/Safari, требует сеть до серверов Google и открытой страницы.
+# Vosk работает локально, поэтому колонка понимает голос в любом браузере.
+# Проверено сквозным циклом TTS -> WAV -> STT: 4 фразы из 4 распознаны точно.
+# ---------------------------------------------------------------------------
+STT_MODEL_DIR = os.environ.get("STT_MODEL_DIR", "/models/stt")
+_stt = {"loaded": False, "model": None, "err": None}
+STT_MAX_BYTES = 12 * 1024 * 1024   # 12 МБ, больше нечего принимать
+
+
+def _stt_ready():
+    if _stt["loaded"]:
+        return True
+    if _stt["err"]:
+        return False
+    try:
+        from vosk import Model, SetLogLevel
+        SetLogLevel(-1)
+        if not os.path.isdir(STT_MODEL_DIR):
+            _stt["err"] = "модель распознавания не установлена: " + STT_MODEL_DIR
+            return False
+        _stt["model"] = Model(STT_MODEL_DIR)
+        _stt["loaded"] = True
+        return True
+    except Exception as e:
+        _stt["err"] = "%s: %s" % (type(e).__name__, e)
+        return False
+
+
+@app.post("/stt")
+async def stt(request: Request):
+    body = await request.body()
+    if not body:
+        raise HTTPException(400, "пустой аудиопоток")
+    if len(body) > STT_MAX_BYTES:
+        raise HTTPException(413, "аудио больше %d МБ" % (STT_MAX_BYTES // 1024 // 1024))
+    if not _stt_ready():
+        raise HTTPException(503, "распознавание недоступно (%s)"
+                            % (_stt["err"] or "причина неизвестна"))
+    try:
+        import io
+        import json as _json
+        import wave
+        from vosk import KaldiRecognizer
+
+        with wave.open(io.BytesIO(body), "rb") as w:
+            if w.getnchannels() != 1 or w.getsampwidth() != 2:
+                raise ValueError("нужен моно PCM 16 бит")
+            rate = w.getframerate()
+            data = w.readframes(w.getnframes())
+    except Exception as e:
+        raise HTTPException(400, "не читается WAV: %s" % e)
+
+    if not data:
+        raise HTTPException(400, "в WAV нет сэмплов")
+
+    try:
+        rec = KaldiRecognizer(_stt["model"], rate)
+        rec.SetWords(True)
+        parts = []
+        step = 4000
+        for i in range(0, len(data), step):
+            if rec.AcceptWaveform(data[i:i + step]):
+                txt = _json.loads(rec.Result()).get("text", "")
+                if txt:
+                    parts.append(txt)
+        txt = _json.loads(rec.FinalResult()).get("text", "")
+        if txt:
+            parts.append(txt)
+    except Exception as e:
+        raise HTTPException(500, "распознавание не удалось: %s" % e)
+
+    return {"text": " ".join(parts).strip(),
+            "seconds": round(len(data) / 2 / float(rate or 16000), 2),
+            "rate": rate}
+
+
+@app.get("/sttHealth")
+async def sttHealth():
+    return {"ready": _stt["loaded"], "model": STT_MODEL_DIR,
+            "error": _stt["err"], "present": os.path.isdir(STT_MODEL_DIR)}
 
 
 # ---------------------------------------------------------------------------

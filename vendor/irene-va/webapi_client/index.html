@@ -240,7 +240,7 @@ const statusEl = $("status"), reasonEl = $("reason"), heard = $("heard");
 const state = {
   last: "", lastAt: null, source: null,
   listening: false, busy: false,
-  rec: null, chunks: [], micStream: null, audioCtx: null, analyser: null, raf: 0,
+  micStream: null, audioCtx: null, analyser: null, raf: 0,
   speaker: "anton",
   busyHint: 0,
 };
@@ -584,46 +584,138 @@ $("ttsBtn").onclick = () => {
 };
 
 /* ---------- speech in + real level meter ---------- */
-let rec = null, finalText = "";
+/* Запись идёт в MediaRecorder, затем разворачивается в моно WAV 16 кГц и
+   уходит на сервер в /stt (vosk). Браузерный SpeechRecognition оставлен
+   запасным путём: он есть только в Chrome/Safari и требует сеть до Google,
+   поэтому онлайн-вариант больше не единственный. */
+let rec = null, finalText = "", mediaRec = null, chunks = [];
+
+function wavFromSamples(buf) {
+  const ch = buf.getChannelData(0);
+  const out = new DataView(new ArrayBuffer(44 + ch.length * 2));
+  const wr = (o, s) => { for (let i = 0; i < s.length; i++) out.setUint8(o + i, s.charCodeAt(i)); };
+  wr(0, "RIFF"); out.setUint32(4, 36 + ch.length * 2, true); wr(8, "WAVE");
+  wr(12, "fmt "); out.setUint32(16, 16, true); out.setUint16(20, 1, true);
+  out.setUint16(22, 1, true); out.setUint32(24, 16000, true);
+  out.setUint32(28, 16000 * 2, true); out.setUint16(32, 2, true); out.setUint16(34, 16, true);
+  wr(36, "data"); out.setUint32(40, ch.length * 2, true);
+  for (let i = 0; i < ch.length; i++) {
+    const s = Math.max(-1, Math.min(1, ch[i]));
+    out.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return out.buffer;
+}
+
+async function toMonoWav16k(blob) {
+  const decoded = await new AudioContext().decodeAudioData(await blob.arrayBuffer());
+  // vosk ждёт 16 кГц, а MediaRecorder пишет в 48 кГц
+  const off = new OfflineAudioContext(1, Math.ceil(decoded.duration * 16000), 16000);
+  const src = off.createBufferSource();
+  src.buffer = decoded;
+  src.connect(off.destination);
+  src.start();
+  return wavFromSamples(await off.startRendering());
+}
+
+async function serverRecognize(blob) {
+  const wav = await toMonoWav16k(blob);
+  const r = await fetch(API + "/stt", {
+    method: "POST",
+    headers: { "Content-Type": "audio/wav" },
+    body: wav,
+  });
+  if (!r.ok) {
+    let d = "";
+    try { d = (await r.json()).detail || ""; } catch (e) { /* не JSON */ }
+    throw new Error("HTTP " + r.status + (d ? " (" + d + ")" : ""));
+  }
+  return (await r.json()).text || "";
+}
+
 function initRec() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) { addMsg("Браузер не поддерживает распознавание речи — пишите текстом.", "system"); return null; }
-  rec = new SR();
-  rec.lang = "ru-RU";
-  rec.interimResults = true;
-  rec.continuous = false;
+  rec = null;
+  if (SR) {
+    rec = new SR();
+    rec.lang = "ru-RU";
+    rec.interimResults = true;
+    rec.continuous = false;
 
-  rec.onstart = () => {
-    state.listening = true;
-    $("micBtn").dataset.on = "true";
-    $("micBtn").textContent = "Слушаю";
-    $("meter").hidden = false;
-    setStatus("Слушаю");
-    startMeter();
-  };
-  rec.onresult = (e) => {
-    let interim = "";
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      const tr = e.results[i][0].transcript;
-      if (e.results[i].isFinal) finalText += tr; else interim += tr;
-    }
-    heard.textContent = interim || finalText;
-  };
-  rec.onerror = (e) => {
-    addMsg(e.error === "not-allowed" ? "Нет доступа к микрофону." : "Ошибка распознавания: " + e.error, "error");
-  };
-  rec.onend = () => {
-    state.listening = false;
-    $("micBtn").dataset.on = "false";
-    $("micBtn").textContent = "Микрофон";
-    $("meter").hidden = true;
-    stopMeter();
-    const said = finalText.trim();
-    heard.textContent = "";
-    finalText = "";
-    if (said) ask(said); else setStatus("Готова");
-  };
+    rec.onresult = (e) => {
+      let interim = "";
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const tr = e.results[i][0].transcript;
+        if (e.results[i].isFinal) finalText += tr; else interim += tr;
+      }
+      heard.textContent = interim || finalText;
+    };
+    rec.onerror = (e) => {
+      addMsg(e.error === "not-allowed" ? "Нет доступа к микрофону." : "Ошибка распознавания: " + e.error, "error");
+    };
+  }
   return rec;
+}
+
+/* Запись через MediaRecorder: снимает в любом браузере, дальше разбираем
+   сервером. Браузерное распознавание включаем только если нет выбора. */
+async function startListening() {
+  state.listening = true;
+  $("micBtn").dataset.on = "true";
+  $("micBtn").textContent = "Слушаю";
+  $("meter").hidden = false;
+  setStatus("Слушаю");
+  startMeter();
+  finalText = "";
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    if (typeof MediaRecorder === "undefined") throw new Error("нет MediaRecorder");
+    mediaRec = new MediaRecorder(stream);
+    chunks = [];
+    mediaRec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+    mediaRec.start();
+  } catch (e) {
+    // нет MediaRecorder или доступа — откатываемся на браузерное распознавание
+    mediaRec = null;
+    if (rec) { try { rec.start(); } catch (e2) { /* уже идёт */ } }
+    else addMsg("Микрофон недоступен: " + e.message, "error");
+  }
+}
+
+async function stopListening() {
+  state.listening = false;
+  $("micBtn").dataset.on = "false";
+  $("micBtn").textContent = "Микрофон";
+  $("meter").hidden = true;
+  stopMeter();
+
+  if (mediaRec && mediaRec.state !== "inactive") {
+    const blob = await new Promise((res) => {
+      mediaRec.onstop = () => res(new Blob(chunks, { type: mediaRec.mimeType || "audio/webm" }));
+      mediaRec.stop();
+    });
+    const tracks = mediaRec.stream ? mediaRec.stream.getTracks() : [];
+    tracks.forEach((t) => t.stop());
+    mediaRec = null;
+    heard.textContent = "";
+    setStatus("Распознаю");
+    try {
+      const text = await serverRecognize(blob);
+      if (text) { ask(text); return; }
+      addMsg("Не разобрал слова. Попробуй ближе к микрофону.", "system");
+      setStatus("Готова");
+    } catch (e) {
+      addMsg("Серверное распознавание не сработало: " + e.message, "error");
+      setStatus("Готова");
+    }
+    return;
+  }
+
+  // браузерный путь
+  if (rec) { try { rec.stop(); } catch (e) { /* нечего останавливать */ } }
+  const said = finalText.trim();
+  heard.textContent = "";
+  finalText = "";
+  if (said) ask(said); else setStatus("Готова");
 }
 
 async function startMeter() {
@@ -660,32 +752,46 @@ function stopMeter() {
 }
 
 $("micBtn").onclick = () => {
-  if (state.listening) { if (rec) rec.stop(); return; }
-  if (!rec) rec = initRec();
-  if (rec) { finalText = ""; rec.start(); }
+  if (state.listening) { stopListening(); return; }
+  if (!rec) initRec();
+  startListening();
 };
 
 /* ---------- voice enrollment ---------- */
+/* Отдельный MediaRecorder (не тот же, что для прослушивания) и сразу WAV:
+   voice-notes кормит whisper, который webm/opus читает через ffmpeg, но в
+   inbox кладут .m4a, так что отдаём то, что ожидает пайплайн. */
+let enrollRec = null, enrollChunks = [];
+
+async function blobToWavBlob(blob) {
+  const wav = await toMonoWav16k(blob);
+  return new Blob([wav], { type: "audio/wav" });
+}
+
 $("enrollBtn").onclick = async () => {
-  if (state.rec && state.rec.state === "recording") { state.rec.stop(); return; }
+  if (enrollRec && enrollRec.state === "recording") { enrollRec.stop(); return; }
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     const mr = new MediaRecorder(stream);
-    state.chunks = [];
-    mr.ondataavailable = (e) => state.chunks.push(e.data);
-    mr.onstop = () => {
-      const blob = new Blob(state.chunks, { type: "audio/webm" });
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = "voice_" + state.speaker + ".webm";
-      a.click();
-      URL.revokeObjectURL(a.href);
+    enrollChunks = [];
+    mr.ondataavailable = (e) => { if (e.data && e.data.size) enrollChunks.push(e.data); };
+    mr.onstop = async () => {
       stream.getTracks().forEach((t) => t.stop());
-      addMsg("Запись сохранена. Положи файл в voice-notes/inbox и запусти --enroll.", "system");
+      enrollRec = null;
+      let out = new Blob(enrollChunks, { type: mr.mimeType || "audio/webm" });
+      let ext = "webm";
+      try { out = await blobToWavBlob(out); ext = "wav"; } catch (e) { /* останется webm */ }
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(out);
+      a.download = "voice_" + state.speaker + "." + ext;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      addMsg("Запись сохранена (" + ext.toUpperCase() + "). Положи файл в "
+             + "voice-notes/inbox и запусти pipeline --enroll " + state.speaker + ".", "system");
     };
     mr.start();
     addMsg("Идёт запись. Нажми ещё раз, чтобы остановить.", "system");
-    state.rec = mr;
+    enrollRec = mr;
   } catch (e) { addMsg("Микрофон недоступен: " + e.message, "error"); }
 };
 

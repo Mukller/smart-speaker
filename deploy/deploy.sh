@@ -41,35 +41,65 @@ die()  { printf '  \033[31mABORT\033[0m %s\n' "$*"; exit 1; }
 [ -d "$VENDOR" ] || die "каталог не найден: $VENDOR (задай REPO_DIR=)"
 
 # -----------------------------------------------------------------------------
+say "0/5 контейнер"
+# Всё дальше делается через docker exec/cp, поэтому контейнер должен быть
+# жив. Раньше это проверялось только на шаге 2, и скрипт падал на шаге 1.
+if ! timeout 60 docker inspect "$CONTAINER" >/dev/null 2>&1; then
+    warn "контейнера $CONTAINER нет — пересоздаю из compose"
+    ( cd "$REPO_DIR/setup" && timeout 900 docker compose up -d ) 2>&1 | tail -3 | sed 's/^/    /'
+elif ! timeout 60 docker exec "$CONTAINER" test -d /models 2>/dev/null; then
+    # контейнер старше compose с томом irene_models: пересоздаём, иначе
+    # модели некуда класть и они будут теряться при каждой пересборке
+    warn "том моделей не подключён — пересоздаю контейнер"
+    ( cd "$REPO_DIR/setup" && timeout 900 docker compose up -d --force-recreate ) 2>&1 \
+        | tail -3 | sed 's/^/    /'
+else
+    ok "контейнер на месте, тома подключены"
+fi
+
+for _ in $(seq 1 60); do
+    [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$API/webapi_client/" || true)" = "200" ] \
+        && break
+    timeout 60 docker start "$CONTAINER" >/dev/null 2>&1 || true
+    sleep 5
+done
+code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$API/webapi_client/" || true)
+[ "$code" = "200" ] && ok "API отвечает" || die "API не поднялся (код $code)"
+
+# -----------------------------------------------------------------------------
 say "1/5 настройки ассистента (options/core.json)"
 # core.json лежит в docker-volume, поэтому переживает пересборку контейнера.
 #  voiceAssNames    — имя, на которое откликается ассистент
-#  ttsEngineId      — console: silero/pyttsx требуют звукового стека, которого
-#                     в контейнере нет (/dev/snd отсутствует). Озвучку в
-#                     веб-интерфейсе делает браузер (Web Speech API).
+#  ttsEngineId      — vosk: модель синтеза лежит в томе irene_models, ключей и
+#                     звуковой карты не нужно. Раньше стоял console, и ядро
+#                     просто печатало текст, голоса не было вовсе.
 #  playWavEngineId  — consolewav: 'audioplayer' требует модуль gi, которого нет,
 #                     из-за чего был зависший ответ и ошибка инициализации.
-python3 - "$CONTAINER" "$ASSISTANT" "$CITY" <<'PY'
-import json, shutil, subprocess, sys, time
-container, assistant, city = sys.argv[1], sys.argv[2], sys.argv[3]
+#
+# ВАЖНО: правка идёт внутри контейнера (docker exec -i), потому что файлы
+# options лежат в volume контейнера, а не на хосте. Раньше скрипт читал их
+# через docker exec, а писал по тому же пути на хосте — и падал с
+# FileNotFoundError, как только требовалось что-то изменить.
+docker exec -i "$CONTAINER" python3 - "$ASSISTANT" "$CITY" <<'PY'
+import json, os, shutil, sys, time
+assistant, city = sys.argv[1], sys.argv[2]
 base = "/app/vendor/irene-va/options"
 
 # wttr.in needs no API key (openweathermap does), just activation + a city,
 # so 'погода' is answered by the plugin instead of falling through to the LLM.
 targets = {
-    "core.json": {"voiceAssNames": assistant, "ttsEngineId": "console",
+    "core.json": {"voiceAssNames": assistant, "ttsEngineId": "vosk",
                   "playWavEngineId": "consolewav"},
     "plugin_weather_wttr.json": {"is_active": True, "location": city},
     "plugin_weatherowm.json": {"is_active": False},
 }
 for name, want in targets.items():
-    path = "%s/%s" % (base, name)
-    raw = subprocess.run(["docker", "exec", container, "cat", path],
-                         capture_output=True)
-    if raw.returncode != 0:
-        print("    WARN: не читается %s" % name)
+    path = os.path.join(base, name)
+    if not os.path.exists(path):
+        print("    WARN: нет файла %s" % name)
         continue
-    cfg = json.loads(raw.stdout.decode("utf-8"))
+    with open(path, encoding="utf-8") as f:
+        cfg = json.load(f)
     changed = {k: (cfg.get(k), v) for k, v in want.items() if cfg.get(k) != v}
     if not changed:
         print("    %-28s уже актуально" % name)
@@ -130,6 +160,39 @@ if [ -d "$TTS_HOST/vosk-model-tts-ru-0.4-irina" ]; then
     fi
 fi
 
+say "1c2/5 модель распознавания речи (volum irene_models, ~88 МБ)"
+# Распознавание локальное (vosk), а не браузерное: работает в любом браузере
+# и не требует сети до Google.
+STT_URL="https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip"
+STT_MD5="d1759dc83eb8fd87850129afbd9f4b7b"
+STT_HOST="$REPO_DIR/.stt-model"
+if [ -d "$STT_HOST/vosk-model-small-ru-0.22" ]; then
+    ok "модель распознавания уже скачана"
+else
+    say "качаю vosk-model-small-ru-0.22 (~44 МБ), это один раз"
+    mkdir -p "$STT_HOST"
+    if curl -sL --max-time 900 -o "$STT_HOST/stt.zip" "$STT_URL"; then
+        got=$(md5sum "$STT_HOST/stt.zip" | cut -d' ' -f1)
+        if [ "$got" = "$STT_MD5" ]; then
+            ( cd "$STT_HOST" && unzip -q -o stt.zip && rm -f stt.zip )
+            ok "модель распознавания скачана и распакована"
+        else
+            bad "md5 не совпал (ожидали $STT_MD5, получили $got)"
+        fi
+    else
+        warn "не удалось скачать модель распознавания — останется браузерный ввод"
+    fi
+fi
+
+if [ -d "$STT_HOST/vosk-model-small-ru-0.22" ]; then
+    timeout 300 docker exec "$CONTAINER" mkdir -p /models/stt 2>/dev/null
+    if timeout 600 docker cp "$STT_HOST/vosk-model-small-ru-0.22/." "$CONTAINER:/models/stt/"; then
+        ok "модель распознавания загружена в контейнер"
+    else
+        warn "модель распознавания не скопировалась"
+    fi
+fi
+
 # -----------------------------------------------------------------------------
 say "1d/5 плагины, которые не могут работать в контейнере"
 # mediacmds тянет pyautogui, которому нужен X-дисплей (в контейнере его нет
@@ -146,16 +209,9 @@ timeout 120 docker exec "$CONTAINER" sh -c '
 
 # -----------------------------------------------------------------------------
 say "2/5 файлы внутри контейнера"
-# Файлы НЕ монтируются в контейнер (в compose только том options), поэтому
-# каждый раз копируем вручную, иначе контейнер продолжит отдавать старый код.
-if ! timeout 60 docker inspect "$CONTAINER" >/dev/null 2>&1; then
-    warn "контейнера $CONTAINER нет — пересоздаю из compose"
-    ( cd "$REPO_DIR/setup" && timeout 900 docker compose up -d ) 2>&1 | tail -3
-    for _ in $(seq 1 60); do
-        [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$API/webapi_client/" || true)" = "200" ] && break
-        sleep 5
-    done
-fi
+# Файлы НЕ монтируются в контейнер (в compose только тома options и models),
+# поэтому каждый раз копируем вручную, иначе контейнер продолжит отдавать
+# старый код.
 for rel in webapi_client/index.html plugins/plugin_greetings.py \
            voice_profiles.json runva_webapi.py; do
     [ -f "$VENDOR/$rel" ] || { warn "нет файла $rel — пропускаю"; continue; }
@@ -335,9 +391,34 @@ if [ "$r" = "200" ]; then
         fails=1
     fi
 else
-    bad "TTS вернул HTTP $r: $(head -c 160 /tmp/kolonka_tts.wav | tr -d '\0')"
-    fails=1
+  bad "TTS вернул HTTP $r: $(head -c 160 /tmp/kolonka_tts.wav | tr -d '\0')"
+  fails=1
 fi
+
+# распознавание: скармливаем TTS-озвучку в STT. Фраза «какая сейчас погода»
+# и ответ «сегодня солнечно» намеренно различаются, поэтому сверяем с
+# ожиданием именно исходную фразу.
+SAY="какая сейчас погода"
+curl -s -o /tmp/kolonka_stt_in.wav --max-time 180 \
+  "$API/tts?text=$(python3 -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))' "$SAY")"
+heard=$(curl -s --max-time 240 -X POST --data-binary @/tmp/kolonka_stt_in.wav \
+        -H "Content-Type: audio/wav" "$API/stt" \
+        | python3 -c "
+import json,sys
+try:
+    print(json.load(sys.stdin).get('text',''))
+except Exception as e:
+    print('<не разобрал ответ: %s>' % e)" 2>/dev/null)
+case "$(echo "$heard" | tr 'A-Z' 'a-z')" in
+  *погод*)
+    ok "распознавание работает: «$SAY» -> «$heard»"
+    ;;
+  *)
+    bad "STT не узнал фразу «$SAY» (получил: «${heard:-пусто}»)"
+    bad "  без этого останется только браузерное распознавание"
+    fails=1
+    ;;
+esac
 
 errs=$(docker logs "$CONTAINER" --since 3m 2>&1 \
        | grep -c 'Ошибка инициализации плагина' || true)
