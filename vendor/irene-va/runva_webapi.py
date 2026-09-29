@@ -6,6 +6,7 @@ from urllib3.util.retry import Retry
 from fastapi import FastAPI, HTTPException
 import uvicorn
 from multiprocessing import Process
+import os
 
 from starlette.responses import HTMLResponse
 from termcolor import cprint
@@ -359,6 +360,97 @@ async def ttsSay(text:str):
     core.play_voice_assistant_speech(text)
     core.remoteTTS = tmpformat
     return ""
+
+
+# ---------------------------------------------------------------------------
+# Собственный TTS: WAV отдаётся в браузер.
+#
+# Готовые /ttsWav и /ttsSayWav не работают: ядро при ttsEngineId="console"
+# только печатает текст и не создаёт temp/vacore_N.wav, поэтому эндпоинты
+# падают с 500 (FileNotFoundError). В контейнере нет /dev/snd, звук наружу
+# не вывести, поэтому синтезируем WAV и отдаём его клиенту.
+# vosk-tts лёгкий: onnxruntime, без torch, модель ~116 МБ.
+# ---------------------------------------------------------------------------
+TTS_MODEL_DIR = os.environ.get("TTS_MODEL_DIR", "/models/tts")
+_tts = {"loaded": False, "model": None, "synth": None, "err": None}
+
+
+def _tts_ready():
+    """Ленивая загрузка: модель ~116 МБ, грузим при первом запросе, а не на старте."""
+    if _tts["loaded"]:
+        return True
+    if _tts["err"]:
+        return False
+    try:
+        from vosk_tts import Model, Synth
+
+        if not os.path.isdir(TTS_MODEL_DIR):
+            _tts["err"] = "модель голоса не установлена: " + TTS_MODEL_DIR
+            return False
+        m = Model(model_path=TTS_MODEL_DIR)
+        _tts["model"] = m
+        _tts["synth"] = Synth(m)
+        _tts["loaded"] = True
+        return True
+    except Exception as e:
+        _tts["err"] = "%s: %s" % (type(e).__name__, e)
+        return False
+
+
+@app.get("/tts")
+async def tts(text: str, speaker_id: int = 0):
+    text = (text or "").strip()
+    if not text:
+        raise HTTPException(400, "пустой текст")
+    if len(text) > 2000:
+        text = text[:2000]
+    if not _tts_ready():
+        raise HTTPException(503, "TTS недоступен (%s)" % (_tts["err"] or "причина неизвестна"))
+    try:
+        # synth(text, oname) у vosk_tts пишет файл и возвращает None, поэтому
+        # берём synth_audio() и собираем WAV сами — без временных файлов.
+        import numpy as np
+        audio = _tts["synth"].synth_audio(text, speaker_id)
+    except AttributeError:
+        import tempfile
+        import wave as _wave
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
+            name = tf.name
+        _tts["synth"].synth(text, name, speaker_id)
+        with open(name, "rb") as f:
+            return Response(content=f.read(), media_type="audio/wav",
+                            headers={"Cache-Control": "no-store"})
+    except Exception as e:
+        raise HTTPException(500, "синтез не удался: %s" % e)
+
+    from starlette.responses import Response
+    import io
+    import wave
+
+    data = np.asarray(audio)
+    if np.issubdtype(data.dtype, np.floating):
+        peak = float(np.max(np.abs(data))) if data.size else 0.0
+        if peak > 0:
+            data = data / peak * 0.9     # тихие фразы иначе почти не слышны
+        pcm = (data * 32767.0).astype("<i2")
+    else:
+        pcm = data.astype("<i2")
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(22050)   # жёстко зашито в vosk_tts Synth.synth
+        w.writeframes(pcm.tobytes())
+    return Response(content=buf.getvalue(), media_type="audio/wav",
+                    headers={"Cache-Control": "no-store"})
+
+
+@app.get("/ttsHealth")
+async def ttsHealth():
+    return {"ready": _tts["loaded"], "model": TTS_MODEL_DIR,
+            "error": _tts["err"],
+            "present": os.path.isdir(TTS_MODEL_DIR)}
 
 
 # Выполняет команду ассистента через систему плагинов (VACore).

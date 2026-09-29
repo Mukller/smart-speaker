@@ -169,6 +169,7 @@
       <h1>Дженет</h1>
       <span class="status" id="status">Готова</span>
       <span class="spacer"></span>
+      <button class="linkish" id="voiceBtn" aria-pressed="true">Голос</button>
       <button class="linkish" id="sideToggle" aria-pressed="false">Панель</button>
       <button class="linkish" id="themeBtn" aria-pressed="false">Светлая</button>
     </header>
@@ -380,6 +381,7 @@ async function ask(cmd) {
     stamp.textContent = (state.lastAt ? hhmm(state.lastAt) + " → " : "") + hhmm(new Date()) + (src ? " · " + src : "");
     state.last = out;
     $("ttsBtn").classList.remove("hidden");
+    speak(out);
   };
 
   const draw = () => {
@@ -446,12 +448,64 @@ $("input").addEventListener("input", (e) => {
   e.target.style.height = Math.min(160, e.target.scrollHeight) + "px";
 });
 
+/* ---------- голосовой ответ ---------- */
+/* Голос синтезирует сервер (vosk-tts, модель в томе irene_models) и отдаёт
+   WAV; в контейнере нет /dev/snd, поэтому звук играет браузер.
+   Если эндпоинт недоступен, откатываемся на Web Speech API. */
+let voiceAudio = null;
+
+function setVoice(on) {
+  state.voice = !!on;
+  writeState("dzh_voice", state.voice);
+  const b = $("voiceBtn");
+  b.setAttribute("aria-pressed", String(state.voice));
+  b.textContent = state.voice ? "Голос" : "Без голоса";
+  if (!state.voice) stopVoice();
+}
+
+function stopVoice() {
+  if (voiceAudio) {
+    voiceAudio.pause();
+    voiceAudio = null;
+  }
+  if ("speechSynthesis" in window) speechSynthesis.cancel();
+}
+
+function fallbackSpeak(t) {
+  if (!("speechSynthesis" in window)) return;
+  try {
+    const u = new SpeechSynthesisUtterance(t);
+    u.lang = "ru-RU";
+    speechSynthesis.speak(u);
+  } catch (e) { /* озвучка необязательна */ }
+}
+
+async function speak(text) {
+  const t = (text || "").trim().slice(0, 1200);
+  if (!state.voice || !t) return;
+  stopVoice();
+  try {
+    const r = await fetch(API + "/tts?text=" + encodeURIComponent(t));
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    voiceAudio = new Audio(url);
+    voiceAudio.onended = () => { URL.revokeObjectURL(url); voiceAudio = null; };
+    // автозапуск может быть заблокирован до жеста — тогда SpeechSynthesis
+    voiceAudio.play().catch(() => fallbackSpeak(t));
+  } catch (e) {
+    fallbackSpeak(t);
+  }
+}
+
+$("voiceBtn").onclick = () => setVoice(!state.voice);
+
 /* ---------- speech out ---------- */
 $("ttsBtn").onclick = () => {
-  if (!state.last || !("speechSynthesis" in window)) return;
-  const u = new SpeechSynthesisUtterance(state.last);
-  u.lang = "ru-RU";
-  speechSynthesis.speak(u);
+  if (!state.last) return;
+  const on = state.voice;
+  state.voice = true;
+  speak(state.last).finally(() => { state.voice = on; });
 };
 
 /* ---------- speech in + real level meter ---------- */
@@ -580,6 +634,7 @@ $("saveBtn").onclick = () => {
 
 /* ---------- boot ---------- */
 applyTheme((() => { try { return localStorage.getItem("dzh_theme") || "dark"; } catch (e) { return "dark"; } })());
+setVoice(readState("dzh_voice", true));
 renderWho();
 renderPlugins();
 setStatus("Готова");

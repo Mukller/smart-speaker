@@ -96,6 +96,40 @@ else
     ok "доступно ${avail} МБ"
 fi
 
+say "1c/5 модель голоса для TTS (volum irene_models, ~116 МБ)"
+# Голос нужен, чтобы колонка звучала, а не печатала текст в консоль: в
+# контейнере нет /dev/snd, поэтому синтезируем WAV и отдаём его браузеру.
+# Модель кладём в отдельный том, иначе она стирается при пересоздании.
+TTS_URL="https://alphacephei.com/vosk/models/vosk-model-tts-ru-0.4-irina.zip"
+TTS_MD5="4d799f050ef931c45b522b6323c172bf"
+TTS_HOST="$REPO_DIR/.tts-model"
+if [ -d "$TTS_HOST/vosk-model-tts-ru-0.4-irina" ]; then
+    ok "модель уже скачана на хосте"
+else
+    say "качаю vosk-model-tts-ru-0.4-irina (~116 МБ), это один раз"
+    mkdir -p "$TTS_HOST"
+    if curl -sL --max-time 900 -o "$TTS_HOST/tts.zip" "$TTS_URL"; then
+        got=$(md5sum "$TTS_HOST/tts.zip" | cut -d' ' -f1)
+        if [ "$got" = "$TTS_MD5" ]; then
+            ( cd "$TTS_HOST" && unzip -q -o tts.zip && rm -f tts.zip )
+            ok "модель скачана и распакована"
+        else
+            bad "md5 не совпал (ожидали $TTS_MD5, получили $got) — модель не тронута"
+        fi
+    else
+        warn "не удалось скачать модель голоса — колонка останется без звука"
+    fi
+fi
+
+if [ -d "$TTS_HOST/vosk-model-tts-ru-0.4-irina" ]; then
+    timeout 300 docker exec "$CONTAINER" mkdir -p /models/tts 2>/dev/null
+    if timeout 600 docker cp "$TTS_HOST/vosk-model-tts-ru-0.4-irina/." "$CONTAINER:/models/tts/"; then
+        ok "модель загружена в контейнер"
+    else
+        warn "модель не скопировалась в контейнер"
+    fi
+fi
+
 # -----------------------------------------------------------------------------
 say "2/5 файлы внутри контейнера"
 # Файлы НЕ монтируются в контейнер (в compose только том options), поэтому
@@ -249,6 +283,24 @@ avail=$(free -m | awk '/^Mem:/{print $7}')
 [ "${avail:-0}" -ge 800 ] \
   && ok "свободной памяти ${avail} МБ" \
   || { bad "свободно только ${avail} МБ — контейнер может зависнуть снова"; fails=1; }
+
+# голос: эндпоинт должен отдать настоящий WAV (сигнатура RIFF), а не пустоту
+r=$(curl -s -o /tmp/kolonka_tts.wav -w '%{http_code}' --max-time 180 \
+  "$API/tts?text=$(python3 -c 'import urllib.parse;print(urllib.parse.quote("Привет, это проверка голоса"))')")
+if [ "$r" = "200" ]; then
+    magic=$(head -c 4 /tmp/kolonka_tts.wav)
+    size=$(wc -c < /tmp/kolonka_tts.wav)
+    if [ "$magic" = "RIFF" ] && [ "$size" -gt 10000 ]; then
+        ok "TTS отдаёт WAV ($size байт)"
+    else
+        bad "TTS ответил, но не WAV: magic='$magic' size=$size"
+        head -c 120 /tmp/kolonka_tts.wav | sed 's/^/      /'; echo
+        fails=1
+    fi
+else
+    bad "TTS вернул HTTP $r: $(head -c 160 /tmp/kolonka_tts.wav | tr -d '\0')"
+    fails=1
+fi
 
 errs=$(docker logs "$CONTAINER" --since 3m 2>&1 \
        | grep -c 'Ошибка инициализации плагина' || true)

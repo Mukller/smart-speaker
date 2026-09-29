@@ -9,11 +9,14 @@ services:
       - "5003:5003"
     volumes:
       - irene_options:/app/vendor/irene-va/options
+      - irene_models:/models
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - TTS_MODEL_DIR=/models/tts
     restart: unless-stopped
 
 volumes:
   irene_options:
+  irene_models:
