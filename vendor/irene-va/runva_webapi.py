@@ -7,6 +7,8 @@ from fastapi import FastAPI, HTTPException, Request
 import uvicorn
 from multiprocessing import Process
 import os
+import re
+import threading
 
 from starlette.responses import HTMLResponse, FileResponse, Response, StreamingResponse
 from termcolor import cprint
@@ -464,7 +466,33 @@ async def ttsHealth():
 # ---------------------------------------------------------------------------
 STT_MODEL_DIR = os.environ.get("STT_MODEL_DIR", "/models/stt")
 _stt = {"loaded": False, "model": None, "err": None}
+# Модель vosk не потокобезопасна, а в постоянном режиме окна распознавания
+# приходят одно за другим - без замка они бы наезжали друг на друга.
+_stt_lock = threading.Lock()
 STT_MAX_BYTES = 12 * 1024 * 1024   # 12 МБ, больше нечего принимать
+
+
+def _recognize_wav(data, rate):
+    """Синхронное распознавание. Запускается в пуле потоков, иначе vosk
+    занимает event loop и весь сервер подтормаживает на время распознавания
+    (замер: /plugins отвечал 91 мс вместо единиц)."""
+    from vosk import KaldiRecognizer
+    import json as _json
+
+    with _stt_lock:
+        rec = KaldiRecognizer(_stt["model"], rate)
+        rec.SetWords(True)
+        parts = []
+        step = 4000
+        for i in range(0, len(data), step):
+            if rec.AcceptWaveform(data[i:i + step]):
+                txt = _json.loads(rec.Result()).get("text", "")
+                if txt:
+                    parts.append(txt)
+        txt = _json.loads(rec.FinalResult()).get("text", "")
+        if txt:
+            parts.append(txt)
+    return " ".join(parts).strip()
 
 
 def _stt_ready():
@@ -498,9 +526,8 @@ async def stt(request: Request):
                             % (_stt["err"] or "причина неизвестна"))
     try:
         import io
-        import json as _json
         import wave
-        from vosk import KaldiRecognizer
+        from starlette.concurrency import run_in_threadpool
 
         with wave.open(io.BytesIO(body), "rb") as w:
             if w.getnchannels() != 1 or w.getsampwidth() != 2:
@@ -514,22 +541,11 @@ async def stt(request: Request):
         raise HTTPException(400, "в WAV нет сэмплов")
 
     try:
-        rec = KaldiRecognizer(_stt["model"], rate)
-        rec.SetWords(True)
-        parts = []
-        step = 4000
-        for i in range(0, len(data), step):
-            if rec.AcceptWaveform(data[i:i + step]):
-                txt = _json.loads(rec.Result()).get("text", "")
-                if txt:
-                    parts.append(txt)
-        txt = _json.loads(rec.FinalResult()).get("text", "")
-        if txt:
-            parts.append(txt)
+        text = await run_in_threadpool(_recognize_wav, data, rate)
     except Exception as e:
         raise HTTPException(500, "распознавание не удалось: %s" % e)
 
-    return {"text": " ".join(parts).strip(),
+    return {"text": text,
             "seconds": round(len(data) / 2 / float(rate or 16000), 2),
             "rate": rate}
 

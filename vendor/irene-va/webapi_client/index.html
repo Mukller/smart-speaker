@@ -66,6 +66,16 @@
   .linkish[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
   .status { font-size: 13px; color: var(--ink-faint); min-width: 74px; }
 
+  /* микрофон постоянного слушания: видно, что он включён */
+  #hotBtn[aria-pressed="true"]::before {
+    content: ""; display: inline-block; width: 7px; height: 7px;
+    border-radius: 50%; background: var(--danger); margin-right: 6px;
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
+  /* то, что колонка услышала, но не выполнила - имени не было */
+  .stamp.dim { opacity: .45; }
+
   /* ---------- chat ---------- */
   .chat { flex: 1; overflow-y: auto; padding: 20px; }
   .thread { max-width: 720px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
@@ -202,6 +212,7 @@
       <h1>Дженет</h1>
       <span class="status" id="status">Готова</span>
       <span class="spacer"></span>
+      <button class="linkish" id="hotBtn" aria-pressed="false">Слушать всегда</button>
       <button class="linkish" id="voiceBtn" aria-pressed="true">Голос</button>
       <button class="linkish" id="sideToggle" aria-pressed="false">Панель</button>
       <button class="linkish" id="themeBtn" aria-pressed="false">Светлая</button>
@@ -482,6 +493,144 @@ async function loadMusic() {
 }
 
 $("audio").addEventListener("ended", () => doAction("next"));
+
+/* ---------- постоянное слушание и будильник ---------- */
+/* Микрофон держим открытым, режем звук на окна и спрашиваем у сервера.
+   Ответ выполняется только если в окне прозвучало имя: "дженет погода".
+   Без имени окна отбрасываются, иначе колонка реагировала бы на шум и
+   на разговоры в комнате. */
+const WAKE = ["дженет", "дженит", "дженетт", "женет", "джепп"];
+const FLUSH_SECONDS = 3.0;   // длина окна распознавания
+const KEEP_SECONDS = 0.6;    // перекрытие, чтобы слово на стыке не пропало
+const SILENCE_RMS = 0.006;   // тише этого - не отправляем вовсе
+
+let hot = {
+  on: false, ctx: null, node: null, stream: null, proc: null,
+  buf: [], bufLen: 0, want: 0, sending: false, quiet: 0,
+};
+
+async function hotStart() {
+  if (hot.on) return;
+  try {
+    hot.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    hot.ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+    const src = hot.ctx.createMediaStreamSource(hot.stream);
+    const sr = hot.ctx.sampleRate;
+    hot.want = Math.round(sr * FLUSH_SECONDS);   // копим до этого объёма
+    hot.keep = Math.round(sr * KEEP_SECONDS);    // столько оставляем на стыке
+    hot.buf = [];
+    hot.bufLen = 0;
+
+    // ScriptProcessor (deprecated, но работает везде, где есть Web Audio);
+    // AudioWorklet требует отдельного файла, который здесь некуда положить
+    hot.proc = hot.ctx.createScriptProcessor(4096, 1, 1);
+    hot.proc.onaudioprocess = (e) => {
+      if (!hot.on) return;
+      const ch = e.inputBuffer.getChannelData(0);
+      hot.buf.push(new Float32Array(ch));
+      hot.bufLen += ch.length;
+      if (hot.bufLen >= hot.want) hotFlush(false);
+    };
+    src.connect(hot.proc);
+    // подключаем в молчание: без этого процессор не вызывается
+    const mute = hot.ctx.createGain();
+    mute.gain.value = 0;
+    hot.proc.connect(mute);
+    mute.connect(hot.ctx.destination);
+
+    hot.on = true;
+    $("hotBtn").setAttribute("aria-pressed", "true");
+    $("hotBtn").textContent = "Слушаю всегда";
+    setStatus("Слушаю всегда");
+    $("heard").textContent = "";
+  } catch (e) {
+    addMsg("Не получилось включить постоянное слушание: " + e.message, "error");
+    setStatus("Готова");
+  }
+}
+
+function hotStop() {
+  hot.on = false;
+  if (hot.proc) { try { hot.proc.disconnect(); } catch (e) {} hot.proc = null; }
+  if (hot.stream) { hot.stream.getTracks().forEach((t) => t.stop()); hot.stream = null; }
+  if (hot.ctx) { hot.ctx.close().catch(() => {}); hot.ctx = null; }
+  hot.buf = [];
+  hot.bufLen = 0;
+  $("hotBtn").setAttribute("aria-pressed", "false");
+  $("hotBtn").textContent = "Слушать всегда";
+  if (!state.busy) setStatus("Готова");
+}
+
+async function hotFlush(final) {
+  if (hot.sending || !hot.bufLen) return;
+  const need = final ? hot.bufLen : hot.want;
+  if (!final && hot.bufLen < need) return;
+
+  // склеиваем буфер в один массив
+  const total = hot.buf.reduce((s, a) => s + a.length, 0);
+  const all = new Float32Array(total);
+  let o = 0;
+  for (const a of hot.buf) { all.set(a, o); o += a.length; }
+
+  let rms = 0;
+  for (let i = 0; i < all.length; i++) rms += all[i] * all[i];
+  rms = Math.sqrt(rms / all.length);
+
+  // оставляем хвост-перекрытие, чтобы слова на стыке окон не терялись
+  const dropFrom = Math.max(0, all.length - hot.keep);
+  hot.buf = [all.slice(dropFrom)];
+  hot.bufLen = all.length - dropFrom;
+
+  if (rms < SILENCE_RMS) { hot.quiet++; if (final) $("heard").textContent = ""; return; }
+  hot.quiet = 0;
+
+  hot.sending = true;
+  try {
+    const wav = floatToWav(all, hot.ctx.sampleRate);
+    const r = await fetch(API + "/stt", {
+      method: "POST", headers: { "Content-Type": "audio/wav" }, body: wav,
+    });
+    if (!r.ok) return;
+    const text = (await r.json()).text || "";
+    if (!text) return;
+    $("heard").textContent = text;
+
+    const at = text.search(new RegExp(WAKE.join("|")));
+    if (at === -1) {
+      // имени не было - показываем, что слышали, но не выполняем
+      if (!final) $("heard").classList.add("dim");
+      return;
+    }
+    $("heard").classList.remove("dim");
+    const rest = text.slice(at + WAKE.reduce((longest, w) =>
+      text.slice(at).toLowerCase().startsWith(w) && w.length > longest ? w.length : longest, 0));
+    const cmd = rest.trim();
+    if (!cmd) return;
+    hot.buf = []; hot.bufLen = 0;   // не реагировать на эхо команды
+    ask(cmd);
+  } catch (e) {
+    /* сеть моргнула - промолчим, попробуем в следующем окне */
+  } finally {
+    hot.sending = false;
+  }
+}
+
+function floatToWav(f32, rate) {
+  const out = new DataView(new ArrayBuffer(44 + f32.length * 2));
+  const wr = (o, s) => { for (let i = 0; i < s.length; i++) out.setUint8(o + i, s.charCodeAt(i)); };
+  wr(0, "RIFF"); out.setUint32(4, 36 + f32.length * 2, true); wr(8, "WAVE");
+  wr(12, "fmt "); out.setUint32(16, 16, true); out.setUint16(20, 1, true);
+  out.setUint16(22, 1, true); out.setUint32(24, rate, true);
+  out.setUint32(28, rate * 2, true); out.setUint16(32, 2, true); out.setUint16(34, 16, true);
+  wr(36, "data"); out.setUint32(40, f32.length * 2, true);
+  for (let i = 0; i < f32.length; i++) {
+    const s = Math.max(-1, Math.min(1, f32[i]));
+    out.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return out.buffer;
+}
+
+$("hotBtn").onclick = () => { if (hot.on) hotStop(); else hotStart(); };
 
 /* ---------- plugins ---------- */
 /* Список берём с сервера: core.plugin_commands — то, что ядро реально
