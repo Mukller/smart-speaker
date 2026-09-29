@@ -298,6 +298,29 @@ avail=$(free -m | awk '/^Mem:/{print $7}')
   && ok "свободной памяти ${avail} МБ" \
   || { bad "свободно только ${avail} МБ — контейнер может зависнуть снова"; fails=1; }
 
+# Маршруты nginx для колонки. Их правили руками на сервере, и однажды конфиг
+# разъехался с шаблоном сайта antonpetnitsky.com — блок /api/ исчез, и каталог
+# начал отдавать 404. Теперь сверяемся с каждым деплоем.
+say "маршруты nginx для колонки"
+NGINX_CONF=/etc/nginx/sites-available/antonpetnitsky.com
+if sudo -n /usr/bin/cat "$NGINX_CONF" > /tmp/kolonka_nginx.conf 2>/dev/null; then
+  missing=""
+  for route in "location /kolonka/" "location /kolonka/sendTxtCmdStream" \
+               "location = /kolonka/tts" "location = /kolonka/plugins" \
+               "location = /kolonka/plugin/toggle"; do
+    grep -qF "$route" /tmp/kolonka_nginx.conf || missing="$missing [$route]"
+  done
+  if [ -z "$missing" ]; then
+    ok "все маршруты колонки на месте"
+  else
+    bad "в nginx отсутствуют:$missing"
+    bad "  источник истины - deploy.sh репозитория antonpetnitsky.com, примени его"
+    fails=1
+  fi
+else
+  warn "не читается $NGINX_CONF, маршруты не проверил"
+fi
+
 # голос: эндпоинт должен отдать настоящий WAV (сигнатура RIFF), а не пустоту
 r=$(curl -s -o /tmp/kolonka_tts.wav -w '%{http_code}' --max-time 180 \
   "$API/tts?text=$(python3 -c 'import urllib.parse;print(urllib.parse.quote("Привет, это проверка голоса"))')")
