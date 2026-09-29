@@ -47,10 +47,10 @@ say "0/5 контейнер"
 if ! timeout 60 docker inspect "$CONTAINER" >/dev/null 2>&1; then
     warn "контейнера $CONTAINER нет — пересоздаю из compose"
     ( cd "$REPO_DIR/setup" && timeout 900 docker compose up -d ) 2>&1 | tail -3 | sed 's/^/    /'
-elif ! timeout 60 docker exec "$CONTAINER" test -d /models 2>/dev/null; then
-    # контейнер старше compose с томом irene_models: пересоздаём, иначе
-    # модели некуда класть и они будут теряться при каждой пересборке
-    warn "том моделей не подключён — пересоздаю контейнер"
+elif ! timeout 60 docker exec "$CONTAINER" sh -c 'test -d /models && test -d /music' 2>/dev/null; then
+    # контейнер старше compose с томами irene_models/music: пересоздаём,
+    # иначе модели некуда класть, а музыка не видна
+    warn "том моделей или музыки не подключён — пересоздаю контейнер"
     ( cd "$REPO_DIR/setup" && timeout 900 docker compose up -d --force-recreate ) 2>&1 \
         | tail -3 | sed 's/^/    /'
 else
@@ -206,6 +206,16 @@ timeout 120 docker exec "$CONTAINER" sh -c '
             "/app/vendor/irene-va/plugins_inactive/$p.py" && echo "    выключен: $p"
     fi
   done' 2>&1 | sed 's/^/  /'
+
+# Плеер: папка с музыкой монтируется из хоста, файлы кладёт пользователь.
+# Пустая папка - не ошибка, поэтому только предупреждаем, если её нет вовсе.
+if timeout 60 docker exec "$CONTAINER" test -d /music 2>/dev/null; then
+    n=$(timeout 60 docker exec "$CONTAINER" sh -c \
+        'ls -1 /music 2>/dev/null | grep -icE "\.(mp3|m4a|aac|ogg|opus|flac|wav|wma)$"' 2>/dev/null)
+    ok "папка музыки подключена (файлов: ${n:-0})"
+else
+    warn "папка музыки не смонтирована — плеер будет пустым"
+fi
 
 # -----------------------------------------------------------------------------
 say "2/5 файлы внутри контейнера"

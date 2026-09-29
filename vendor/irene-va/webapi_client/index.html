@@ -157,6 +157,28 @@
   .pl.togglable:hover .pl-cmds { color: var(--ink-dim); }
   .pl-note { font-size: 12.5px; color: var(--ink-faint); }
 
+  /* ---------- player ---------- */
+  .pl-now { font-size: 13px; color: var(--ink); margin-bottom: 8px; }
+  .pl-vol { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .volbar { flex: 1; height: 4px; background: var(--surface-2); border-radius: 2px; overflow: hidden; }
+  .volbar i { display: block; height: 100%; background: var(--accent); transition: width .15s; }
+  .volnum { font-size: 12px; color: var(--ink-faint); min-width: 34px; text-align: right; }
+  .pl-list { max-height: 168px; overflow-y: auto; margin-bottom: 8px; }
+  .pl-track {
+    display: block; width: 100%; text-align: left; background: none;
+    border: none; border-left: 2px solid transparent; color: var(--ink-dim);
+    padding: 5px 8px; font-size: 13px; border-radius: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .pl-track:hover { color: var(--ink); background: var(--surface); }
+  .pl-track.cur { color: var(--accent); border-left-color: var(--accent); }
+  .pl-add { display: flex; gap: 6px; }
+  .pl-add input {
+    flex: 1; min-width: 0; background: var(--surface); color: var(--ink);
+    border: 1px solid var(--line); border-radius: 6px; padding: 5px 9px; font-size: 13px;
+  }
+  .pl-add input:focus { outline: none; border-color: var(--ink-faint); }
+
   .who-btn { margin: 0 4px 4px 0; }
   .tts { width: 100%; margin-top: 8px; background: var(--surface-2); border: 1px solid var(--line); padding: 7px; border-radius: 6px; font-size: 13px; }
   .hidden { display: none !important; }
@@ -173,6 +195,7 @@
 </style>
 </head>
 <body>
+<audio id="audio" preload="none"></audio>
 <div class="app">
   <main class="main">
     <header class="bar">
@@ -219,6 +242,10 @@
     <section>
       <h2>Плагины</h2>
       <div id="plugins"></div>
+    </section>
+    <section>
+      <h2>Плеер</h2>
+      <div id="player"></div>
     </section>
     <section>
       <h2>Диалог</h2>
@@ -315,6 +342,147 @@ function renderWho() {
   });
 }
 
+/* ---------- плеер ---------- */
+/* В контейнере нет звуковой карты, поэтому музыку играет браузер, а команды
+   "громче/тише/вперёд/назад" приходят из ассистента полем action. */
+const VOL_STEP = 10;
+
+let music = { tracks: [], index: -1, volume: 70, muted: false, now: "" };
+
+function renderPlayer() {
+  const box = $("player");
+  box.innerHTML = "";
+
+  const now = document.createElement("div");
+  now.className = "pl-now";
+  now.textContent = music.now || "ничего не играет";
+  box.appendChild(now);
+
+  const vol = document.createElement("div");
+  vol.className = "pl-vol";
+  const down = chip("Тише", () => doAction("volume_down"));
+  const bar = document.createElement("div");
+  bar.className = "volbar";
+  const fill = document.createElement("i");
+  fill.style.width = (music.muted ? 0 : music.volume) + "%";
+  bar.appendChild(fill);
+  const up = chip("Громче", () => doAction("volume_up"));
+  vol.append(down, bar, up);
+  const volNum = document.createElement("span");
+  volNum.className = "volnum";
+  volNum.textContent = music.muted ? "выкл" : music.volume + "%";
+  vol.appendChild(volNum);
+  box.appendChild(vol);
+
+  if (music.tracks.length) {
+    const list = document.createElement("div");
+    list.className = "pl-list";
+    music.tracks.forEach((t, i) => {
+      const b = document.createElement("button");
+      b.className = "pl-track" + (i === music.index ? " cur" : "");
+      b.textContent = t.title;
+      b.title = t.name;
+      b.onclick = () => { music.index = i; playTrack(); };
+      list.appendChild(b);
+    });
+    box.appendChild(list);
+  } else {
+    const e = document.createElement("div");
+    e.className = "pl-note";
+    e.textContent = "в папке музыки пусто — добавь ссылку или положи файл на сервер";
+    box.appendChild(e);
+  }
+
+  const add = document.createElement("div");
+  add.className = "pl-add";
+  const inp = document.createElement("input");
+  inp.type = "text";
+  inp.placeholder = "ссылка на трек (http…)";
+  const btn = chip("Добавить", () => {
+    const v = inp.value.trim();
+    if (!v) return;
+    music.tracks.push({ name: v, title: shortName(v), size: 0, url: v });
+    inp.value = "";
+    renderPlayer();
+  });
+  inp.addEventListener("keydown", (e) => { if (e.key === "Enter") btn.click(); });
+  add.append(inp, btn);
+  box.appendChild(add);
+}
+
+function shortName(u) {
+  try {
+    const p = new URL(u).pathname.split("/").filter(Boolean).pop();
+    return p ? decodeURIComponent(p) : u.slice(0, 40);
+  } catch (e) { return u.slice(0, 40); }
+}
+
+function chip(text, fn) {
+  const b = document.createElement("button");
+  b.className = "chip";
+  b.textContent = text;
+  b.onclick = fn;
+  return b;
+}
+
+function playTrack() {
+  const t = music.tracks[music.index];
+  if (!t) return;
+  const audio = $("audio");
+  audio.src = t.url || (API + "/music/file?name=" + encodeURIComponent(t.name));
+  audio.volume = music.muted ? 0 : music.volume / 100;
+  audio.play().catch(() => { music.now = "браузер не дал включить звук"; renderPlayer(); });
+  music.now = t.title;
+  renderPlayer();
+}
+
+function doAction(a) {
+  const audio = $("audio");
+  switch (a) {
+    case "play":
+      if (music.index < 0 && music.tracks.length) music.index = 0;
+      if (music.index >= 0) playTrack();
+      else music.now = "плейлист пуст";
+      break;
+    case "pause": audio.pause(); break;
+    case "next":
+    case "prev": {
+      if (!music.tracks.length) { music.now = "плейлист пуст"; break; }
+      const d = a === "next" ? 1 : -1;
+      music.index = (music.index + d + music.tracks.length) % music.tracks.length;
+      playTrack();
+      break;
+    }
+    case "volume_up":
+      music.muted = false;
+      music.volume = Math.min(100, music.volume + VOL_STEP);
+      audio.volume = music.volume / 100;
+      break;
+    case "volume_down":
+      music.volume = Math.max(0, music.volume - VOL_STEP);
+      audio.volume = music.volume / 100;
+      break;
+    case "mute": music.muted = true; audio.volume = 0; break;
+    case "unmute": music.muted = false; audio.volume = music.volume / 100; break;
+    case "now_playing": break;
+    default: return;
+  }
+  renderPlayer();
+}
+
+async function loadMusic() {
+  try {
+    const r = await fetch(API + "/music");
+    if (!r.ok) return;
+    const d = await r.json();
+    const fromUrl = music.tracks.filter((t) => t.url);   // ссылки держим
+    music.tracks = fromUrl.concat(d.tracks || []);
+    renderPlayer();
+  } catch (e) { /* плеер не критичен */ }
+}
+
+$("audio").addEventListener("ended", () => doAction("next"));
+
 /* ---------- plugins ---------- */
 /* Список берём с сервера: core.plugin_commands — то, что ядро реально
    зарегистрировало. Раньше здесь был выдуманный список из localStorage,
@@ -410,7 +578,7 @@ async function loadPlugins() {
 }
 
 /* ---------- quick chips ---------- */
-const QUICK = ["привет", "время", "дата", "погода", "брось кубик", "таймер 5 минут"];
+const QUICK = ["привет", "время", "погода", "брось кубик", "таймер 5 минут", "громче", "тише"];
 $("chips").innerHTML = "";
 QUICK.forEach((c) => {
   const b = document.createElement("button");
@@ -446,7 +614,7 @@ async function ask(cmd) {
   const live = addMsg("…", "bot", { pending: true });
   const bubble = live.querySelector(".bubble");
   const stamp = live.querySelector(".stamp");
-  let out = "", thinking = "", answered = false;
+  let out = "", thinking = "", answered = false, action = null;
 
   const finish = (src) => {
     state.busy = false;
@@ -458,6 +626,7 @@ async function ask(cmd) {
     stamp.textContent = (state.lastAt ? hhmm(state.lastAt) + " → " : "") + hhmm(new Date()) + (src ? " · " + src : "");
     state.last = out;
     $("ttsBtn").classList.remove("hidden");
+    if (action) doAction(action);
     speak(out);
   };
 
@@ -492,6 +661,7 @@ async function ask(cmd) {
         if (d.thinking) thinking = d.thinking;
         if (d.response) { out = d.response; answered = true; }
         if (d.source) state.source = d.source;
+        if (d.action) action = d.action;
         draw();
       }
     }
@@ -505,6 +675,7 @@ async function ask(cmd) {
       if (d.error) { addMsg("Ошибка: " + d.error, "error"); finish(null); return; }
       out = d.restxt || "";
       state.source = d.source || "llm";
+      if (d.action) action = d.action;
       finish(state.source === "llm" ? "llm" : null);
     } catch (e2) {
       addMsg("Сеть недоступна: " + e2.message, "error");
@@ -821,6 +992,8 @@ setVoice(readState("dzh_voice", true));
 renderWho();
 renderPlugins();
 loadPlugins();
+renderPlayer();
+loadMusic();
 setStatus("Готова");
 </script>
 </body>

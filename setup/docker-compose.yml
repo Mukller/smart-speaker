@@ -10,6 +10,8 @@ services:
     volumes:
       - irene_options:/app/vendor/irene-va/options
       - irene_models:/models
+      # папка с музыкой: файлы кладёшь на хосте, контейнер видит их сразу
+      - ${MUSIC_DIR:-../music}:/music:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:

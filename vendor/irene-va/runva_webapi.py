@@ -8,7 +8,7 @@ import uvicorn
 from multiprocessing import Process
 import os
 
-from starlette.responses import HTMLResponse
+from starlette.responses import HTMLResponse, FileResponse, Response, StreamingResponse
 from termcolor import cprint
 import json
 import re
@@ -541,6 +541,82 @@ async def sttHealth():
 
 
 # ---------------------------------------------------------------------------
+# Плеер: список своих файлов и отдача их потоком.
+# В контейнере нет /dev/snd, звук играет браузер, поэтому сервер отдаёт файл,
+# а управление (громче/тише/вперёд/назад) приходит командами ассистента.
+# ---------------------------------------------------------------------------
+MUSIC_DIR = os.environ.get("MUSIC_DIR", "/music")
+MUSIC_EXT = (".mp3", ".m4a", ".aac", ".ogg", ".opus", ".flac", ".wav", ".wma")
+# имя не должно вылезать за пределы папки
+MUSIC_NAME_RE = re.compile(r"^[^/\\]{1,180}$")
+
+
+def _list_music():
+    out = []
+    try:
+        for n in sorted(os.listdir(MUSIC_DIR)):
+            if n.lower().endswith(MUSIC_EXT) and not n.startswith("."):
+                try:
+                    size = os.path.getsize(os.path.join(MUSIC_DIR, n))
+                except OSError:
+                    continue
+                out.append({"name": n, "size": size,
+                            "title": os.path.splitext(n)[0].replace("_", " ")})
+    except Exception as e:
+        return {"error": str(e), "tracks": []}
+    return {"tracks": out, "count": len(out), "dir": MUSIC_DIR}
+
+
+@app.get("/music")
+async def music():
+    return _list_music()
+
+
+@app.get("/music/file")
+async def music_file(name: str, request: Request):
+    if not MUSIC_NAME_RE.match(name or ""):
+        raise HTTPException(400, "недопустимое имя файла: %r" % name)
+    path = os.path.join(MUSIC_DIR, name)
+    if not os.path.isfile(path):
+        raise HTTPException(404, "нет такого файла: %s" % name)
+
+    ext = os.path.splitext(name)[1].lower()
+    mime = {".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".aac": "audio/aac",
+            ".ogg": "audio/ogg", ".opus": "audio/ogg", ".flac": "audio/flac",
+            ".wav": "audio/wav", ".wma": "audio/x-ms-wma"}.get(ext, "application/octet-stream")
+
+    size = os.path.getsize(path)
+    # <audio> просит Range, без него не работает перемотка
+    rng = request.headers.get("range", "")
+    m = re.match(r"bytes=(\d*)-(\d*)", rng) if rng else None
+    if m:
+        start = int(m.group(1)) if m.group(1) else 0
+        end = int(m.group(2)) if m.group(2) else size - 1
+        end = min(end, size - 1)
+        if start >= size or start > end:
+            return Response(status_code=416,
+                            headers={"Content-Range": "bytes */%d" % size})
+        length = end - start + 1
+        def chunks(fp=path, s=start, l=length):
+            with open(fp, "rb") as f:
+                f.seek(s)
+                left = l
+                while left > 0:
+                    b = f.read(min(65536, left))
+                    if not b:
+                        break
+                    left -= len(b)
+                    yield b
+        return StreamingResponse(chunks(), status_code=206, media_type=mime,
+                                 headers={"Content-Range": "bytes %d-%d/%d" % (start, end, size),
+                                          "Accept-Ranges": "bytes",
+                                          "Content-Length": str(length)})
+
+    return FileResponse(path, media_type=mime,
+                        headers={"Accept-Ranges": "bytes"})
+
+
+# ---------------------------------------------------------------------------
 # Реальный список того, что колонка умеет.
 # Раньше интерфейс показывал выдуманные пять плагинов из localStorage, что
 # расходилось с сервером. Источник истины - core.plugin_commands: туда ядро
@@ -689,8 +765,59 @@ def _try_plugins(cmd):
     return None
 
 
+def _player_command(cmd):
+    """Команды управления плеером. Возвращает (текст, действие) или None.
+
+    Обрабатываются здесь, а не плагином: действие должно попасть в ответ
+    структурно (поле action), чтобы интерфейс исполнил его, и срабатывать
+    мгновенно, не дожидаясь подбора команды плагинами.
+    Порядок важен - сначала самые длинные формулировки, иначе "следующий"
+    перехватит "следующий трек".
+    """
+    text = (cmd or "").strip().lower().replace("ё", "е")
+    # убираем имя ассистента, если его произнесли
+    name = _first_assistant_name().lower()
+    if name and text.startswith(name):
+        text = text[len(name):].strip()
+
+    table = [
+        # (подстроки, ответ, действие)
+        (("следующий трек", "следующую песню", "дальше по музыке",
+          "следующий", "далее", "вперед", "вперёд", "переключи", "next"),
+         "Следующий трек", "next"),
+        (("предыдущий трек", "предыдущую песню", "предыдущий",
+          "назад", "назад по музыке", "предыдущая", "back", "rewind"),
+         "Предыдущий трек", "prev"),
+        (("громче", "погромче", "добавь громкости", "прибавь звук",
+          "громкость выше", "louder", "volume up"),
+         "Громче", "volume_up"),
+        (("тише", "потише", "убавь громкости", "уменьши звук",
+          "громкость ниже", "quieter", "volume down"),
+         "Тише", "volume_down"),
+        (("выключи звук", "без звука", "заглуши", "mute"), "Звук выключен", "mute"),
+        (("включи звук", "звук включи", "unmute"), "Звук включён", "unmute"),
+        (("пауза", "подожди", "стой", "остановись", "хватит", "pause", "стоп музыку"),
+         "Пауза", "pause"),
+        (("следующая станция", "другая станция", "следующее радио"),
+         "Следующая станция", "next"),
+        (("включи музыку", "включи радио", "поставь музыку", "играй музыку",
+          "включи песню", "играй", "давай музыку", "play", "музыку"),
+         "Включаю", "play"),
+        (("что играет", "что звучит", "что за музыка"),
+         "Сейчас играет", "now_playing"),
+    ]
+    for words, reply, action in table:
+        if any(w in text for w in words):
+            return reply, action
+    return None
+
+
 @app.get("/sendTxtCmd")
 async def sendSimpleTxtCmd(cmd:str,returnFormat:str = "saytxt"):
+    player = _player_command(cmd)
+    if player is not None:
+        reply, action = player
+        return {"restxt": reply, "source": "player", "action": action}
     plugin_answer = _try_plugins(cmd)
     if plugin_answer is not None:
         return {"restxt": plugin_answer, "source": "plugin"}
@@ -703,6 +830,14 @@ async def sendSimpleTxtCmdStream(cmd:str, model:str = "qwen2.5:0.5b-instruct"):
     import asyncio
 
     async def event_generator():
+        # Плеер: действие возвращаем структурно, интерфейс его выполнит
+        player = _player_command(cmd)
+        if player is not None:
+            reply, action = player
+            yield "data: " + json.dumps({"response": reply, "source": "player",
+                                         "action": action}) + "\n\n"
+            yield "data: [DONE]\n\n"
+            return
         # Плагин отвечает мгновенно и без "размышлений" - отдаём его сразу.
         plugin_answer = _try_plugins(cmd)
         if plugin_answer is not None:
