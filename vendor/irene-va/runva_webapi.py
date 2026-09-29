@@ -11,6 +11,7 @@ import os
 from starlette.responses import HTMLResponse
 from termcolor import cprint
 import json
+import re
 from starlette.websockets import WebSocket
 
 # try:
@@ -451,6 +452,96 @@ async def ttsHealth():
     return {"ready": _tts["loaded"], "model": TTS_MODEL_DIR,
             "error": _tts["err"],
             "present": os.path.isdir(TTS_MODEL_DIR)}
+
+
+# ---------------------------------------------------------------------------
+# Реальный список того, что колонка умеет.
+# Раньше интерфейс показывал выдуманные пять плагинов из localStorage, что
+# расходилось с сервером. Источник истины - core.plugin_commands: туда ядро
+# само регистрирует команды всех загруженных плагинов.
+# ---------------------------------------------------------------------------
+OPTIONS_DIR = "/app/vendor/irene-va/options"
+PLUGIN_NAME_RE = re.compile(r"^plugin_[a-z0-9_]{1,60}$")
+
+
+def _plugin_states():
+    """is_active из options. У большинства плагинов ключа нет вовсе —
+    читает его только погодный, поэтому absent = None, а не False."""
+    states = {}
+    try:
+        for n in os.listdir(OPTIONS_DIR):
+            if n.startswith("plugin_") and n.endswith(".json"):
+                try:
+                    with open(os.path.join(OPTIONS_DIR, n), encoding="utf-8") as f:
+                        states[n[:-5]] = json.load(f).get("is_active")
+                except Exception:
+                    states[n[:-5]] = None
+    except Exception:
+        pass
+    return states
+
+
+@app.get("/plugins")
+async def plugins():
+    items = []
+    try:
+        pc = getattr(core, "plugin_commands", {}) or {}
+        for name, cmds in pc.items():
+            if isinstance(cmds, dict):
+                raw = [str(k) for k in cmds.keys()]
+            elif isinstance(cmds, (list, tuple, set)):
+                raw = [str(c) for c in cmds]
+            else:
+                raw = [str(cmds)]
+            # в манифестах синонимы записаны одним ключом через "|"
+            # ("привет|доброе утро"), для человека это нечитаемо
+            keys = []
+            for r in raw:
+                for part in r.split("|"):
+                    part = part.strip()
+                    if part and part not in keys:
+                        keys.append(part)
+            items.append({"name": str(name), "count": len(keys),
+                          "commands": keys[:24]})
+    except Exception as e:
+        return {"error": "не удалось прочитать plugin_commands: %s" % e,
+                "plugins": [], "states": _plugin_states()}
+
+    items.sort(key=lambda x: -x["count"])
+    names = _first_assistant_name()
+    return {
+        "plugins": items,
+        "states": _plugin_states(),
+        "assistant": names,
+        "total_commands": sum(i["count"] for i in items),
+    }
+
+
+@app.get("/plugin/toggle")
+async def plugin_toggle(name: str, active: bool = True):
+    # Пишущий эндпоинт: имя проверяем строго, иначе через name=../../etc/passwd
+    # можно было бы записать произвольный файл в options.
+    if not PLUGIN_NAME_RE.match(name or ""):
+        raise HTTPException(400, "недопустимое имя плагина: %r" % name)
+    path = os.path.join(OPTIONS_DIR, name + ".json")
+    cfg = {}
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                cfg = json.load(f)
+        except Exception as e:
+            raise HTTPException(500, "не читается %s: %s" % (path, e))
+    old = cfg.get("is_active")
+    cfg["is_active"] = bool(active)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        raise HTTPException(500, "не записался %s: %s" % (path, e))
+    # is_active читает только погодный плагин и делает это при старте,
+    # поэтому без перезапуска контейнера состояние не изменится.
+    return {"ok": True, "name": name, "was": old, "is_active": bool(active),
+            "needsRestart": True}
 
 
 # Выполняет команду ассистента через систему плагинов (VACore).

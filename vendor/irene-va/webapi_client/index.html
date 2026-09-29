@@ -140,12 +140,20 @@
   }
   .reason { font-size: 13.5px; color: var(--ink-dim); white-space: pre-wrap; word-break: break-word; min-height: 60px; }
 
-  .pl { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 13px; cursor: pointer; }
+  .pl { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 13px; }
   .pl + .pl { border-top: 1px solid var(--line); }
   .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ink-faint); flex-shrink: 0; }
   .dot.on { background: var(--ok); }
   .pl span:first-of-type { color: var(--ink); }
   .pl small { color: var(--ink-faint); margin-left: auto; text-align: right; }
+  .pl-total { font-size: 12px; color: var(--ink-faint); padding: 2px 0 8px; }
+  .pl-cmds {
+    font-size: 11.5px; color: var(--ink-faint); padding: 2px 0 4px 14px;
+    line-height: 1.4; word-break: break-word;
+  }
+  .pl.togglable { cursor: pointer; }
+  .pl.togglable:hover .pl-cmds { color: var(--ink-dim); }
+  .pl-note { font-size: 12.5px; color: var(--ink-faint); }
 
   .who-btn { margin: 0 4px 4px 0; }
   .tts { width: 100%; margin-top: 8px; background: var(--surface-2); border: 1px solid var(--line); padding: 7px; border-radius: 6px; font-size: 13px; }
@@ -306,30 +314,97 @@ function renderWho() {
 }
 
 /* ---------- plugins ---------- */
-const PLUGINS = [
-  ["plugin_greetings", "Приветствие", "привет"],
-  ["plugin_datetime", "Дата и время", "дата"],
-  ["plugin_weather_wttr", "Погода", "погода"],
-  ["plugin_random", "Кубик", "брось"],
-  ["plugin_timer", "Таймер", "таймер"],
-];
+/* Список берём с сервера: core.plugin_commands — то, что ядро реально
+   зарегистрировало. Раньше здесь был выдуманный список из localStorage,
+   который расходился с реальностью. */
 const readState = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) || d; } catch (e) { return d; } };
 const writeState = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
 
+let pluginData = { plugins: [], states: {}, total_commands: 0 };
+
 function renderPlugins() {
   const box = $("plugins");
-  const st = readState("dzh_plugins", {});
   box.innerHTML = "";
-  PLUGINS.forEach(([id, title, cmd]) => {
-    const on = st[id] !== undefined ? st[id] : id === "plugin_greetings";
+  const list = pluginData.plugins || [];
+
+  if (!list.length) {
+    const e = document.createElement("div");
+    e.className = "pl-note";
+    e.textContent = "не удалось получить список с сервера";
+    box.appendChild(e);
+    return;
+  }
+
+  const total = document.createElement("div");
+  total.className = "pl-total";
+  total.textContent = list.length + " " + plural(list.length, "плагин", "плагина", "плагинов") +
+                      " · " + (pluginData.total_commands || 0) + " команд";
+  box.appendChild(total);
+
+  list.forEach((p) => {
     const row = document.createElement("div");
     row.className = "pl";
-    row.innerHTML = '<span class="dot ' + (on ? "on" : "") + '"></span>' +
-                    "<span>" + title + "</span><small>" + (on ? "вкл" : "выкл") + "</small>";
-    row.onclick = () => { st[id] = !on; writeState("dzh_plugins", st); renderPlugins(); };
-    row.oncontextmenu = (e) => { e.preventDefault(); ask(cmd); };
+    const dot = document.createElement("span");
+    dot.className = "dot on";
+    const name = document.createElement("span");
+    name.textContent = p.name;
+    const small = document.createElement("small");
+    small.textContent = p.count + " " + plural(p.count, "команда", "команды", "команд");
+    row.append(dot, name, small);
+
+    const cmds = document.createElement("div");
+    cmds.className = "pl-cmds";
+    cmds.textContent = (p.commands || []).slice(0, 6).join(" · ");
+    if (!cmds.textContent) cmds.textContent = "без команд";
+    row.appendChild(cmds);
+
+    // переключать можно только погодный: is_active читает лишь он и делает
+    // это при старте, поэтому после клика нужен перезапуск
+    // (в core.plugin_commands имена уже с префиксом plugin_, не добавляем второй)
+    const key = /^plugin_/.test(p.name) ? p.name : "plugin_" + p.name;
+    if (pluginData.states && pluginData.states[key] !== undefined) {
+      const on = !!pluginData.states[key];
+      dot.className = "dot " + (on ? "on" : "");
+      small.textContent = (on ? "вкл" : "выкл") + " · " + p.count;
+      row.classList.add("togglable");
+      row.title = on ? "выключить" : "включить";
+      row.onclick = async () => {
+        const next = !on;
+        try {
+          const r = await fetch(API + "/plugin/toggle?name=" + encodeURIComponent(key) +
+                                "&active=" + next);
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          pluginData.states[key] = next;
+          renderPlugins();
+          setStatus(next ? "Включено, применится после перезапуска"
+                         : "Выключено, применится после перезапуска");
+        } catch (e) {
+          setStatus("Не получилось: " + e.message);
+        }
+      };
+    } else {
+      row.title = "всегда включён";
+    }
     box.appendChild(row);
   });
+}
+
+function plural(n, one, few, many) {
+  const m10 = n % 10, m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) return few;
+  return many;
+}
+
+async function loadPlugins() {
+  try {
+    const r = await fetch(API + "/plugins");
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    pluginData = await r.json();
+  } catch (e) {
+    pluginData = { plugins: [], states: {}, total_commands: 0, error: String(e) };
+  }
+  renderPlugins();
 }
 
 /* ---------- quick chips ---------- */
@@ -637,6 +712,7 @@ applyTheme((() => { try { return localStorage.getItem("dzh_theme") || "dark"; } 
 setVoice(readState("dzh_voice", true));
 renderWho();
 renderPlugins();
+loadPlugins();
 setStatus("Готова");
 </script>
 </body>

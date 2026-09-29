@@ -131,6 +131,20 @@ if [ -d "$TTS_HOST/vosk-model-tts-ru-0.4-irina" ]; then
 fi
 
 # -----------------------------------------------------------------------------
+say "1d/5 плагины, которые не могут работать в контейнере"
+# mediacmds тянет pyautogui, которому нужен X-дисплей (в контейнере его нет
+# и появиться не может), audioplayer требует PyGObject (gi) и звуковую
+# карту. Оба падают при каждом старте и засоряют лог, поэтому выключаем.
+# is_active они не читают - единственный способ убрать их из загрузки.
+timeout 120 docker exec "$CONTAINER" sh -c '
+  for p in plugin_mediacmds plugin_playwav_audioplayer; do
+    if [ -f "/app/vendor/irene-va/plugins/$p.py" ]; then
+      mv -f "/app/vendor/irene-va/plugins/$p.py" \
+            "/app/vendor/irene-va/plugins_inactive/$p.py" && echo "    выключен: $p"
+    fi
+  done' 2>&1 | sed 's/^/  /'
+
+# -----------------------------------------------------------------------------
 say "2/5 файлы внутри контейнера"
 # Файлы НЕ монтируются в контейнер (в compose только том options), поэтому
 # каждый раз копируем вручную, иначе контейнер продолжит отдавать старый код.
