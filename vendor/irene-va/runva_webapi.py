@@ -9,6 +9,7 @@ from multiprocessing import Process
 import os
 import re
 import threading
+import time
 
 from starlette.responses import HTMLResponse, FileResponse, Response, StreamingResponse
 from termcolor import cprint
@@ -565,6 +566,10 @@ MUSIC_DIR = os.environ.get("MUSIC_DIR", "/music")
 MUSIC_EXT = (".mp3", ".m4a", ".aac", ".ogg", ".opus", ".flac", ".wav", ".wma")
 # имя не должно вылезать за пределы папки
 MUSIC_NAME_RE = re.compile(r"^[^/\\]{1,180}$")
+# снимок активных таймеров: чтобы отличить «истёк» от «его не было»
+_timer_seen = {}
+# ядро не заполняет timersDuration, поэтому длительность помним сами
+_timer_total = {}
 
 
 def _list_music():
@@ -583,10 +588,128 @@ def _list_music():
     return {"tracks": out, "count": len(out), "dir": MUSIC_DIR}
 
 
+_RU_NUM = {
+    "одна": 1, "один": 1, "одну": 1, "одного": 1, "одной": 1,
+    "две": 2, "два": 2, "двенадцать": 12,
+    "три": 3, "четыре": 4, "пять": 5, "шесть": 6, "семь": 7,
+    "восемь": 8, "девять": 9, "десять": 10, "одиннадцать": 11,
+    "двенадцать": 12, "тринадцать": 13, "четырнадцать": 14, "пятнадцать": 15,
+    "шестнадцать": 16, "семнадцать": 17, "восемнадцать": 18, "девятнадцать": 19,
+    "двадцать": 20, "тридцать": 30, "сорок": 40, "пятьдесят": 50,
+    "шестьдесят": 60, "семьдесят": 70, "восемьдесят": 80, "девяносто": 90,
+    "сто": 100, "полтора": 1.5, "пару": 2,
+}
+_UNIT_SEC = ("секунд", "секунда", "секунду", "секунды", "секундочек", "сек")
+_UNIT_MIN = ("минут", "минута", "минуту", "минуты", "мин")
+_UNIT_HOUR = ("час", "часа", "часов", "ч")
+
+
+def _parse_ru_number(word):
+    w = (word or "").strip().lower().replace("ё", "е")
+    if w.isdigit():
+        return int(w)
+    if w in _RU_NUM:
+        return _RU_NUM[w]
+    # составные: "двадцать пять", "двадцать5" склеим по словам
+    parts = w.split()
+    if len(parts) == 2 and parts[0] in _RU_NUM and parts[1] in _RU_NUM:
+        base = _RU_NUM[parts[0]]
+        tail = _RU_NUM[parts[1]]
+        if base % 10 == 0 and 1 <= tail <= 9:
+            return base + tail
+    return None
+
+
+def _parse_duration(text):
+    """Секунды из фразы: "на 5 минут", "через 30 секунд", "1 минуту 30 секунд".
+
+    Число ищем самое длинное ("двадцать пять", а не "пять") и все единицы
+    складываем ("1 минуту 30 секунд" = 90).
+    """
+    toks = re.findall(r"[\w]+", (text or "").lower().replace("ё", "е"))
+    total = 0
+    found = False
+    for i, t in enumerate(toks):
+        if t in _UNIT_SEC:
+            mult = 1
+        elif t in _UNIT_MIN:
+            mult = 60
+        elif t in _UNIT_HOUR:
+            mult = 3600
+        else:
+            continue
+        num = None
+        for back in (3, 2, 1):
+            if i - back < 0:
+                continue
+            nums = [_parse_ru_number(c) for c in toks[i - back:i]]
+            if not nums or any(n is None for n in nums):
+                continue
+            if len(nums) == 1:
+                num = nums[0]
+            else:
+                base, tail = nums[0], nums[1:]
+                if all(base % 10 == 0 and 1 <= n <= 9 for n in tail):
+                    num = base + sum(tail)
+            if num:
+                break
+        if num and num > 0:
+            total += int(num) * mult
+            found = True
+    return total if found and total > 0 else None
+
+
+@app.get("/timers")
+async def timers():
+    """Активные таймеры и те, что сработали с прошлого опроса.
+
+    Звук будильника в контейнере играть нечем (нет /dev/snd), поэтому
+    сообщаем браузеру, что таймер истёк, и отдаём сам wav: звонок звучит
+    на устройстве пользователя.
+    """
+    now = time.time()
+    active = []
+    try:
+        slots = list(getattr(core, "timers", []) or [])
+    except Exception:
+        slots = []
+    for i, end in enumerate(slots):
+        if end and end > 0:
+            dur = 0
+            try:
+                dur = int((getattr(core, "timersDuration", []) or [0] * 8)[i] or 0)
+            except Exception:
+                dur = 0
+            active.append({"id": i, "left": int(end - now),
+                           "total": dur or int(_timer_total.get(i, 0))})
+
+    fired = []
+    for i, end in enumerate(slots):
+        was = _timer_seen.get(i)
+        if was and (not end or end <= 0):
+            fired.append({"id": i, "after": int(was)})
+    _timer_seen.clear()
+    for i, end in enumerate(slots):
+        if end and end > 0:
+            _timer_seen[i] = end
+            _timer_total.setdefault(i, 0)
+
+    return {"active": active, "fired": fired, "now": int(now)}
+
+
+@app.get("/timerwav")
+async def timerwav():
+    """Звонок будильника: отдаём wav, который проиграет браузер."""
+    path = "/app/vendor/irene-va/media/timer.wav"
+    if not os.path.isfile(path):
+        raise HTTPException(404, "нет файла звонка: %s" % path)
+    return FileResponse(path, media_type="audio/wav",
+                        headers={"Accept-Ranges": "bytes"})
+
+
 @app.get("/music")
 async def music():
     return _list_music()
-
 
 @app.get("/music/file")
 async def music_file(name: str, request: Request):
@@ -821,11 +944,54 @@ def _player_command(cmd):
          "Включаю", "play"),
         (("что играет", "что звучит", "что за музыка"),
          "Сейчас играет", "now_playing"),
+        (("отмени таймер", "отмени будильник", "сними таймер",
+          "отменить таймер", "отменить будильник", "выключи таймер"),
+         "Таймер отменён", "cancel_timers"),
+        (("сколько осталось", "сколько до таймера", "таймер сколько"),
+         "Таймер", "timers_status"),
     ]
     for words, reply, action in table:
         if any(w in text for w in words):
+            if action == "cancel_timers":
+                try:
+                    core.clear_timers()
+                    _timer_seen.clear()
+                    _timer_total.clear()
+                except Exception as e:
+                    return "Не смогла отменить: %s" % e, None
             return reply, action
+
+    # таймер ставим сами: разбор чисел в плагине ненадёжен
+    # ("на 2 секунды" превращалось в 2 минуты, "на 5 минут" не срабатывало)
+    if re.search(r"таймер|будильник|alarm", text) and \
+            re.search(r"поставь|поставить|включи|заряди|поставьте|через|через\s|постав", text):
+        secs = _parse_duration(text)
+        if secs and secs > 0:
+            try:
+                core.clear_timers()          # новый таймер заменяет старый
+                slot = core.set_timer(secs, lambda *a, **k: None)
+                _timer_seen.clear()
+                _timer_total.clear()
+                if slot is None or slot < 0:
+                    return "Не получилось поставить таймер.", None
+                _timer_total[slot] = secs
+                return _human_duration(secs), "timer_set"
+            except Exception as e:
+                return "Не получилось поставить таймер: %s" % e, None
     return None
+
+
+def _human_duration(secs):
+    if secs < 60:
+        word = "секунду" if secs == 1 else "секунды" if secs < 5 else "секунд"
+        return "Поставлю таймер на %d %s" % (secs, word)
+    if secs < 3600:
+        m = secs // 60
+        word = "минуту" if m == 1 else "минуты" if m < 5 else "минут"
+        return "Поставлю таймер на %d %s" % (m, word)
+    h = secs // 3600
+    word = "час" if h == 1 else "часа" if h < 5 else "часов"
+    return "Поставлю таймер на %d %s" % (h, word)
 
 
 @app.get("/sendTxtCmd")

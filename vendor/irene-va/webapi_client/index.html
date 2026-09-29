@@ -189,6 +189,12 @@
   }
   .pl-add input:focus { outline: none; border-color: var(--ink-faint); }
 
+  /* ---------- будильник ---------- */
+  .al-row { display: flex; align-items: center; gap: 8px; }
+  .al-time { font-size: 15px; color: var(--ink); font-variant-numeric: tabular-nums; }
+  .al-total { font-size: 11.5px; color: var(--ink-faint); }
+  .al-row .chip { margin-left: auto; }
+
   .who-btn { margin: 0 4px 4px 0; }
   .tts { width: 100%; margin-top: 8px; background: var(--surface-2); border: 1px solid var(--line); padding: 7px; border-radius: 6px; font-size: 13px; }
   .hidden { display: none !important; }
@@ -253,6 +259,10 @@
     <section>
       <h2>Плагины</h2>
       <div id="plugins"></div>
+    </section>
+    <section>
+      <h2>Будильник</h2>
+      <div id="alarm"></div>
     </section>
     <section>
       <h2>Плеер</h2>
@@ -351,6 +361,71 @@ function renderWho() {
     b.onclick = () => { state.speaker = id; renderWho(); };
     box.appendChild(b);
   });
+}
+
+/* ---------- будильник ---------- */
+/* Плагин таймера умеет, но звук в контейнере играть нечем, поэтому следим за
+   слотом на сервере и проигрываем звонок в браузере. */
+let alarm = { active: [], poll: 0, ringing: 0 };
+
+function mmss(s) {
+  s = Math.max(0, Math.round(s));
+  const m = Math.floor(s / 60);
+  return m + ":" + String(s % 60).padStart(2, "0");
+}
+
+function renderAlarm() {
+  const box = $("alarm");
+  box.innerHTML = "";
+  if (!alarm.active.length) {
+    const e = document.createElement("div");
+    e.className = "pl-note";
+    e.textContent = "таймер не задан";
+    box.appendChild(e);
+    return;
+  }
+  alarm.active.forEach((t) => {
+    const row = document.createElement("div");
+    row.className = "al-row";
+    const t1 = document.createElement("span");
+    t1.className = "al-time";
+    t1.textContent = mmss(t.left);
+    const t2 = document.createElement("span");
+    t2.className = "al-total";
+    t2.textContent = t.total ? "из " + mmss(t.total) : "";
+    const btn = chip("Отменить", () => { doAction("cancel_timers"); });
+    row.append(t1, t2, btn);
+    box.appendChild(row);
+  });
+}
+
+async function pollTimers() {
+  try {
+    const r = await fetch(API + "/timers");
+    if (!r.ok) return;
+    const d = await r.json();
+    alarm.active = d.active || [];
+    if ((d.fired || []).length) ringAlarm();
+    renderAlarm();
+  } catch (e) { /* сеть моргнула */ }
+}
+
+function ringAlarm() {
+  if (alarm.ringing) return;          // не пускать второй звонок внахлёст
+  alarm.ringing = Date.now();
+  addMsg("Таймер сработал!", "system");
+  setStatus("Таймер сработал!");
+  speak("Таймер сработал");
+  const a = new Audio(API + "/timerwav");
+  a.volume = music.muted ? 0 : music.volume / 100;
+  a.play().catch(() => { /* браузер не дал - хотя бы текст показали */ });
+  setTimeout(() => { alarm.ringing = 0; }, 20000);
+}
+
+function startAlarmPoll() {
+  if (alarm.poll) return;
+  pollTimers();
+  alarm.poll = setInterval(pollTimers, 2000);
 }
 
 /* ---------- плеер ---------- */
@@ -476,6 +551,17 @@ function doAction(a) {
     case "mute": music.muted = true; audio.volume = 0; break;
     case "unmute": music.muted = false; audio.volume = music.volume / 100; break;
     case "now_playing": break;
+    case "timer_set":
+      pollTimers();
+      break;
+    case "cancel_timers":
+      pollTimers();
+      setStatus("Таймеры отменены");
+      break;
+    case "timers_status":
+      if (!alarm.active.length) { music.now = "таймер не задан"; break; }
+      setStatus("Осталось " + mmss(alarm.active[0].left));
+      break;
     default: return;
   }
   renderPlayer();
@@ -1143,6 +1229,8 @@ renderPlugins();
 loadPlugins();
 renderPlayer();
 loadMusic();
+renderAlarm();
+startAlarmPoll();
 setStatus("Готова");
 </script>
 </body>
