@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: webapi compiles
+        run: python -m py_compile vendor/irene-va/runva_webapi.py
+
+      - name: deploy script is valid shell
+        run: |
+          bash -n deploy/deploy.sh
+          if command -v shellcheck >/dev/null; then
+            shellcheck -S warning deploy/deploy.sh || true
+          fi
+
+      # Главная проверка. Интерфейс уже ходит через единый префикс
+      # /kolonka/api/, и однажды три теста продолжили считать запросы по
+      # старым путям: наборы падали на живом, исправном приложении, и это
+      # выглядело как регрессия. Расхождение путей обязано валить сборку.
+      - name: routes agree between interface and tests
+        run: python tests/check_routes.py
+
+      - name: no secret in tracked files
+        run: |
+          # Токен бота лежит на сервере в .telegram и в гит не попадает.
+          # Появление похожей строки в коде означало бы утечку при любом
+          # зеркалировании репозитория.
+          if git grep -nE '[0-9]{8,10}:[A-Za-z0-9_-]{30,}' -- . \
+             | grep -v 'check_routes.py' \
+             | grep -v 'deploy/deploy.sh'; then
+            echo "::error::найдена строка, похожая на токен Telegram"
+            exit 1
+          fi
+          echo "токенов в коде нет"
+
+      - name: .telegram is not tracked
+        run: |
+          if git ls-files --error-unmatch .telegram >/dev/null 2>&1; then
+            echo "::error::.telegram попал в репозиторий"
+            exit 1
+          fi
+          echo "секрет не отслеживается"
