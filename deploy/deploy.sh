@@ -371,7 +371,7 @@ say "маршруты nginx для колонки"
 NGINX_CONF=/etc/nginx/sites-available/antonpetnitsky.com
 if sudo -n /usr/bin/cat "$NGINX_CONF" > /tmp/kolonka_nginx.conf 2>/dev/null; then
   missing=""
-  for route in "location /kolonka/" "location /kolonka/sendTxtCmdStream" \
+  for route in "location /kolonka/" "location /kolonka/api/" \
                "location = /kolonka/tts" "location = /kolonka/plugins" \
                "location = /kolonka/plugin/toggle"; do
     grep -qF "$route" /tmp/kolonka_nginx.conf || missing="$missing [$route]"

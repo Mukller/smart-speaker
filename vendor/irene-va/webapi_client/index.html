@@ -188,6 +188,8 @@
     border: 1px solid var(--line); border-radius: 6px; padding: 5px 9px; font-size: 13px;
   }
   .pl-add input:focus { outline: none; border-color: var(--ink-faint); }
+  .pl-sources { display: flex; gap: 6px; margin: 6px 0 8px; }
+  .pl-results { max-height: 220px; overflow-y: auto; }
 
   /* ---------- будильник ---------- */
   .al-row { display: flex; align-items: center; gap: 8px; }
@@ -280,7 +282,10 @@
 
 <script>
 "use strict";
-const API = "/kolonka";
+/* Все запросы к ассистенту идут через один префикс /kolonka/api/, который
+   nginx проксирует в корень контейнера. Раньше каждый endpoint требовал
+   своей location в nginx, и правило систематически забывали. */
+const API = "/kolonka/api";
 const NAME = "дженет";
 
 const $ = (id) => document.getElementById(id);
@@ -434,6 +439,8 @@ function startAlarmPoll() {
 const VOL_STEP = 10;
 
 let music = { tracks: [], index: -1, volume: 70, muted: false, now: "" };
+let searchSeq = 0;   // защита от гонки: два поиска подряд перетирали друг друга
+let searchSrc = "archive";   // выбранный источник, чтобы Enter его не терял
 
 function renderPlayer() {
   const box = $("player");
@@ -483,17 +490,79 @@ function renderPlayer() {
   add.className = "pl-add";
   const inp = document.createElement("input");
   inp.type = "text";
-  inp.placeholder = "ссылка на трек (http…)";
-  const btn = chip("Добавить", () => {
-    const v = inp.value.trim();
-    if (!v) return;
-    music.tracks.push({ name: v, title: shortName(v), size: 0, url: v });
-    inp.value = "";
-    renderPlayer();
-  });
-  inp.addEventListener("keydown", (e) => { if (e.key === "Enter") btn.click(); });
+  inp.id = "searchInput";
+  inp.placeholder = "найти музыку или вставить ссылку";
+  const btn = chip("Найти", doSearch);
+  inp.addEventListener("keydown", (e) => { if (e.key === "Enter") doSearch(); });
   add.append(inp, btn);
   box.appendChild(add);
+
+  const src = document.createElement("div");
+  src.className = "pl-sources";
+  src.append(
+    chip("Полные треки", () => { doSearch("archive"); }),
+    chip("Превью 30 с", () => { doSearch("itunes"); }));
+  box.appendChild(src);
+
+  const res = document.createElement("div");
+  res.className = "pl-results";
+  res.id = "searchResults";
+  box.appendChild(res);
+}
+
+async function doSearch(source) {
+  const inp = $("searchInput");
+  const q = inp ? inp.value.trim() : "";
+  const box = $("searchResults");
+  if (!box) return;
+
+  // если это не поисковый запрос, а ссылка - просто добавляем трек
+  if (/^https?:\/\//i.test(q)) {
+    music.tracks.push({ name: q, title: shortName(q), size: 0, url: q });
+    inp.value = "";
+    renderPlayer();
+    return;
+  }
+  if (q.length < 2) {
+    box.innerHTML = '<div class="pl-note">введи название или вставь ссылку</div>';
+    return;
+  }
+  const src = source || searchSrc;
+  // запоминаем выбор: раньше нажатие Enter всегда искало в archive,
+  // игнорируя выбранную кнопку источника
+  searchSrc = src;
+  const seq = ++searchSeq;
+  box.innerHTML = '<div class="pl-note">ищу…</div>';
+  try {
+    const r = await fetch(API + "/music/search?q=" + encodeURIComponent(q) +
+                          "&source=" + src + "&limit=10");
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const d = await r.json();
+    // пока шёл поиск, мог начаться новый - тогда этот результат уже неактуален
+    if (seq !== searchSeq) return;
+    if (!d.results || !d.results.length) {
+      box.innerHTML = '<div class="pl-note">ничего не нашлось</div>';
+      return;
+    }
+    box.innerHTML = "";
+    d.results.forEach((t) => {
+      const b = document.createElement("button");
+      b.className = "pl-track";
+      b.textContent = (t.artist ? t.artist + " — " : "") + t.title;
+      b.title = t.note + ": " + t.url;
+      b.onclick = () => {
+        music.tracks.push({ name: t.url, title: t.title, size: 0, url: t.url });
+        renderPlayer();
+        const i = music.tracks.length - 1;
+        music.index = i;
+        playTrack();
+      };
+      box.appendChild(b);
+    });
+  } catch (e) {
+    if (seq !== searchSeq) return;
+    box.innerHTML = '<div class="pl-note">поиск не удался: ' + e.message + "</div>";
+  }
 }
 
 function shortName(u) {

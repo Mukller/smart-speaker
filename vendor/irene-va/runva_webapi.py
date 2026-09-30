@@ -620,6 +620,13 @@ def _parse_ru_number(word):
     return None
 
 
+def _flat(v):
+    """Archive отдаёт creator списком или строкой - приводим к строке."""
+    if isinstance(v, list):
+        return ", ".join(str(x) for x in v[:2])
+    return str(v or "")
+
+
 def _parse_duration(text):
     """Секунды из фразы: "на 5 минут", "через 30 секунд", "1 минуту 30 секунд".
 
@@ -705,6 +712,104 @@ async def timerwav():
         raise HTTPException(404, "нет файла звонка: %s" % path)
     return FileResponse(path, media_type="audio/wav",
                         headers={"Accept-Ranges": "bytes"})
+
+
+@app.get("/music/search")
+async def music_search(q: str = "", source: str = "archive", limit: int = 12):
+    """Поиск музыки в бесплатных источниках без ключей.
+
+    Spotify, Yandex Music и SoundCloud бесплатного открытого API для
+    потоковой передачи не имеют: то, что гуглится как «API», это
+    реверс-инжиниринг приватных эндпоинтов, он нарушает условия сервисов и
+    ломается на каждом их обновлении. Поэтому используем честные источники.
+
+    Internet Archive - полные треки, mp3/ogg, без ключа.
+    iTunes Search API - превью 30 секунд, без ключа.
+    Поиск идёт с сервера: браузеру не нужен CORS, а главное - мы отсекаем
+    .flac, который в браузере не играет.
+    """
+    q = (q or "").strip()
+    if len(q) < 2:
+        raise HTTPException(400, "запрос слишком короткий")
+    limit = max(1, min(int(limit or 12), 25))
+    ses = _ollama_session          # переиспользуем сессию с повторами
+
+    def _get(url, params=None, timeout=12):
+        try:
+            r = ses.get(url, params=params, timeout=timeout,
+                        headers={"User-Agent": "kolonka/1.0"})
+            return r.json() if r.status_code == 200 else None
+        except Exception:
+            return None
+
+    out = []
+    scanned_info = {}
+    if source == "itunes":
+        d = _get("https://itunes.apple.com/search",
+                 {"term": q, "media": "music", "limit": limit})
+        for r in ((d or {}).get("results") or []):
+            url = r.get("previewUrl")
+            if not url:
+                continue
+            out.append({
+                "title": r.get("trackName") or r.get("collectionName") or "",
+                "artist": r.get("artistName", ""),
+                "url": url, "kind": "preview",
+                "note": "превью 30 секунд",
+            })
+    else:
+        # Минимальный запрос: только identifier. Раньше добавлял fl[]=title и
+        # sort[]=downloads, и Solr возвращал numFound, но у документов
+        # identifier был null - поля отдавались пустыми. Название и автор
+        # берём из метаданных, которые всё равно запрашиваем.
+        d = _get("https://archive.org/advancedsearch.php", {
+            "q": 'mediatype:audio AND collection:audio_music AND (%s)' % q,
+            "fl[]": "identifier", "rows": limit * 4, "output": "json"})
+        scanned = 0
+        skipped = 0
+        for doc in ((d or {}).get("response", {}).get("docs") or []):
+            if len(out) >= limit:
+                break
+            ident = doc.get("identifier")
+            if not ident:
+                continue
+            scanned += 1
+            meta = _get("https://archive.org/metadata/" + ident, timeout=10)
+            if not meta:
+                skipped += 1
+                continue
+            files = meta.get("files") or []
+            # .flac браузер не играет, поэтому только mp3/ogg/m4a.
+            # Поле size у mp3 часто отсутствует, поэтому на него не опираемся:
+            # требование size > N отсекало вообще всё и поиск был пуст.
+            playable = [f for f in files
+                        if str(f.get("name", "")).lower().endswith(
+                            (".mp3", ".ogg", ".m4a"))]
+            if not playable:
+                skipped += 1
+                continue
+            # сперва крупные (обычно полная версия), при равенстве - mp3
+            playable.sort(key=lambda f: -(int(f.get("size") or 0)))
+            best = playable[0]
+            # Путь строим как {server}{dir}/{name}, а не /download/{id}/{name}:
+            # если файл лежит в подкаталоге (disc1/...), вторая форма даёт 404
+            # и браузер получает HTML вместо звука. Проверено на реальном
+            # треке: правильная форма отдаёт 206 с ID3, неправильная - 404.
+            url = "https://%s%s/%s" % (
+                meta.get("server") or "archive.org",
+                meta.get("dir") or ("/download/" + ident),
+                requests.utils.quote(best["name"]))
+            out.append({
+                "title": (meta.get("metadata") or {}).get("title") or doc.get("title") or ident,
+                "artist": _flat((meta.get("metadata") or {}).get("creator")),
+                "url": url, "kind": "full",
+                "note": "полный трек",
+            })
+        scanned_info = {"scanned": scanned, "skipped": skipped,
+                        "found": ((d or {}).get("response", {}) or {}).get("numFound")}
+
+    return {"source": source, "query": q, "count": len(out), "results": out,
+            "diag": scanned_info}
 
 
 @app.get("/music")
