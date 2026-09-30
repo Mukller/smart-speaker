@@ -457,6 +457,83 @@ async def tts(text: str, speaker_id: int = 0):
                     headers={"Cache-Control": "no-store"})
 
 
+@app.get("/audioHealth")
+def audioHealth():
+    """Что колонка может проигрывать и что нужно, чтобы проигрывала.
+
+    Сделано для переноса на Raspberry Pi: там есть карта и aplay, здесь
+    сервер без звука и всё играет браузер. Разница видна только на словах,
+    поэтому состояние спрашивается явно и с конкретной причиной, а не
+    «звук работает».
+    """
+    import shutil
+    import subprocess
+
+    out = {"backend": "browser", "playWavEngineId": None, "alsa": {},
+           "tts": {}, "available_engines": [], "recommendation": None}
+
+    try:
+        opt = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "options", "core.json")
+        with open(opt, "r", encoding="utf-8") as f:
+            out["playWavEngineId"] = json.load(f).get("playWavEngineId")
+    except Exception as e:
+        out["options_error"] = "%s: %s" % (type(e).__name__, e)
+
+    def probe(cmd):
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+            return (p.stdout or p.stderr or "").strip()
+        except Exception as e:
+            return "%s: %s" % (type(e).__name__, e)
+
+    aplay = shutil.which("aplay")
+    out["alsa"] = {
+        "dev_snd": os.path.isdir("/dev/snd"),
+        "aplay": aplay or None,
+        "arecord": shutil.which("arecord") or None,
+    }
+    if aplay:
+        out["alsa"]["cards"] = probe([aplay, "-l"]).splitlines()[:6]
+        if out["alsa"]["arecord"]:
+            out["alsa"]["capture"] = probe(["arecord", "-l"]).splitlines()[:6]
+
+    # Движок считается доступным, если есть его файл и та утилита, без
+    # которой он не заработает. Импортом проверять нельзя: плагины лежат в
+    # соседнем каталоге и не обязаны быть в sys.path, и проверка врала бы.
+    here = os.path.dirname(os.path.abspath(__file__))
+    need = {"aplay": "aplay", "consolewav": None, "simpleaudio": None,
+            "sounddevice": None}
+    for name, tool in need.items():
+        f = os.path.join(here, "plugins", "plugin_playwav_%s.py" % name)
+        if not os.path.isfile(f):
+            continue
+        if tool and not shutil.which(tool):
+            continue
+        out["available_engines"].append(name)
+
+    out["tts"] = {
+        "engine": "vosk", "rate": 22050, "channels": 1, "sample_width": 2,
+        "format": "s16le", "ready": _tts["loaded"], "error": _tts["err"],
+        "aplay_args": ["-q", "-f", "S16_LE", "-c", "1", "-r", "22050"],
+    }
+
+    if out["alsa"]["dev_snd"] and aplay:
+        out["backend"] = "local"
+        out["recommendation"] = ("ALSA есть: можно играть локально, "
+                                 "поставь playWavEngineId=aplay")
+    else:
+        missing = []
+        if not out["alsa"]["dev_snd"]:
+            missing.append("нет /dev/snd")
+        if not aplay:
+            missing.append("не установлен alsa-utils (aplay)")
+        out["recommendation"] = "звук играет браузер"
+        if missing:
+            out["recommendation"] += "; для локального звука: " + ", ".join(missing)
+    return out
+
+
 @app.get("/ttsHealth")
 async def ttsHealth():
     return {"ready": _tts["loaded"], "model": TTS_MODEL_DIR,

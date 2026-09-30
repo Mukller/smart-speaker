@@ -73,23 +73,44 @@ say "1/5 настройки ассистента (options/core.json)"
 #  ttsEngineId      — vosk: модель синтеза лежит в томе irene_models, ключей и
 #                     звуковой карты не нужно. Раньше стоял console, и ядро
 #                     просто печатало текст, голоса не было вовсе.
-#  playWavEngineId  — consolewav: 'audioplayer' требует модуль gi, которого нет,
-#                     из-за чего был зависший ответ и ошибка инициализации.
+#  playWavEngineId  — выбирается автоматически выше: aplay, если на машине
+#                     есть карта, иначе consolewav. 'audioplayer' требует
+#                     модуль gi, которого в контейнере нет, из-за чего был
+#                     зависший ответ и ошибка инициализации.
 #
+# Звук выбираем по машине, а не жёстко. На Raspberry Pi есть карта и aplay,
+# и колонка должна говорить сама; на этом сервере звука нет, и всё играет
+# браузер. AUDIO_BACKEND можно задать явно.
+#
+# Проверяем именно В КОНТЕЙНЕРЕ, а не на хосте: этот конфиг читает ядро
+# внутри контейнера. На этом сервере ALSA есть у хоста, но в контейнере её
+# нет, и выбор по хосту включал aplay там, где aplay не запустится.
+if [ "${AUDIO_BACKEND:-auto}" = "auto" ]; then
+    if timeout 60 docker exec "$CONTAINER" sh -c \
+        '[ -d /dev/snd ] && command -v aplay >/dev/null 2>&1'; then
+        playwav=aplay
+    else
+        playwav=consolewav
+    fi
+else
+    playwav="$AUDIO_BACKEND"
+fi
+echo "    звук: playWavEngineId=$playwav"
+
 # ВАЖНО: правка идёт внутри контейнера (docker exec -i), потому что файлы
 # options лежат в volume контейнера, а не на хосте. Раньше скрипт читал их
 # через docker exec, а писал по тому же пути на хосте — и падал с
 # FileNotFoundError, как только требовалось что-то изменить.
-docker exec -i "$CONTAINER" python3 - "$ASSISTANT" "$CITY" <<'PY'
+docker exec -i "$CONTAINER" python3 - "$ASSISTANT" "$CITY" "$playwav" <<'PY'
 import json, os, shutil, sys, time
-assistant, city = sys.argv[1], sys.argv[2]
+assistant, city, playwav = sys.argv[1], sys.argv[2], sys.argv[3]
 base = "/app/vendor/irene-va/options"
 
 # wttr.in needs no API key (openweathermap does), just activation + a city,
 # so 'погода' is answered by the plugin instead of falling through to the LLM.
 targets = {
     "core.json": {"voiceAssNames": assistant, "ttsEngineId": "vosk",
-                  "playWavEngineId": "consolewav"},
+                  "playWavEngineId": playwav},
     "plugin_weather_wttr.json": {"is_active": True, "location": city},
     "plugin_weatherowm.json": {"is_active": False},
 }
