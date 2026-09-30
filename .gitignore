@@ -27,3 +27,6 @@ localhost.crt
 .vscode/
 Thumbs.db
 .DS_Store
+
+# токен и чат для звонков будильника (живут на сервере, в гит нельзя)
+.telegram
