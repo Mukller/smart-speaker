@@ -380,6 +380,45 @@ pc=$(curl -s --max-time 20 "$API/plugins" | tr ',' '\n' | grep -c '"name"' || tr
 [ "${pc:-0}" -ge 8 ] && ok "плагинов в списке: $pc" \
     || { bad "плагинов в списке всего $pc - часть выпала"; fails=1; }
 
+# Канал будильника проверяем запросом к API, а не наличием файла: скопированный
+# файл ещё не значит, что его читает приложение и что токен рабочий. Раньше
+# проверка жила только в коде, и деплой мог убрать звонок в Telegram молча.
+ah=$(curl -s --max-time 25 "$API/audioHealth" 2>/dev/null || echo "{}")
+tg_ok=$(printf '%s' "$ah" | python3 -c "
+import json,sys
+try:
+    print('yes' if json.load(sys.stdin) else 'no')
+except Exception:
+    print('no')
+" 2>/dev/null)
+if [ "$tg_ok" = "yes" ]; then
+    ok "состояние звука и канала известно (audioHealth отвечает)"
+else
+    bad "audioHealth не отвечает - нельзя понять, на чём играет колонка"
+    fails=1
+fi
+
+# Будильник должен уметь позвонить в Telegram: проверяем конфигурацию,
+# не отправляя сообщение человеку во время деплоя.
+if timeout 90 docker exec "$CONTAINER" python3 - <<'PY' >/dev/null 2>&1
+import os, sys
+p = "/app/.telegram"
+if not os.path.isfile(p):
+    sys.exit(1)
+keys = set()
+for line in open(p, encoding="utf-8"):
+    line = line.strip()
+    if "=" in line and not line.startswith("#"):
+        keys.add(line.split("=", 1)[0].strip().upper())
+sys.exit(0 if {"TOKEN", "CHAT"} <= keys else 1)
+PY
+then
+    ok "канал будильника в контейнере настроен (токен и чат на месте)"
+else
+    bad "канал будильника не настроен - звонок будет только в браузере"
+    fails=1
+fi
+
 code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
        --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/kolonka/" || echo 000)
 [ "$code" = "200" ] && ok "сайт /kolonka/ -> 200" || { bad "сайт /kolonka/ -> $code"; fails=1; }
