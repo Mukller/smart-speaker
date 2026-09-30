@@ -88,7 +88,7 @@ def request_weather(core:VACore):
 
 # сформировать описание погоды, на основании словаря JSON
 def get_weather_text(data: dict):
-    descr = data['lang_ru'][0]['value']
+    descr = lc_first(data['lang_ru'][0]['value'])
 
     humidity = data['humidity']
     pressure = round(int(data['pressure']) / 1.333)
@@ -103,8 +103,16 @@ def get_weather_text(data: dict):
 
     return descr + '. ' + forecast_text(temp, temp_feel, humidity, str(pressure), wind_speed)
 
+def lc_first(s: str) -> str:
+    # wttr.in отдаёт описание с заглавной буквы ("Пасмурно"), а плагин
+    # подставляет его внутрь фразы. Получалось «Сегодня Пасмурно.» -
+    # заглавная посреди предложения.
+    s = str(s or '').strip()
+    return s[:1].lower() + s[1:] if s else s
+
+
 def get_weather_text_short(data: dict):
-    descr = 'Сегодня '+data['lang_ru'][0]['value']
+    descr = 'Сегодня ' + lc_first(data['lang_ru'][0]['value'])
 
     if 'temp_C' in data:
         temp = data['temp_C']

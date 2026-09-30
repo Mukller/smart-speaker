@@ -570,7 +570,13 @@ async def sttHealth():
 # а управление (громче/тише/вперёд/назад) приходит командами ассистента.
 # ---------------------------------------------------------------------------
 MUSIC_DIR = os.environ.get("MUSIC_DIR", "/music")
-MUSIC_EXT = (".mp3", ".m4a", ".aac", ".ogg", ".opus", ".flac", ".wav", ".wma")
+# Только то, что браузер действительно играет. Раньше сюда попадали .flac,
+# .wav и .wma: файл показывался в плейлисте, а <audio> молча отказывался его
+# воспроизводить - трек выглядел рабочим и не звучал.
+MUSIC_EXT = (".mp3", ".m4a", ".aac", ".ogg", ".opus")
+# Прочие аудиоформаты показываем отдельным списком: не отдаём, но и не
+# прячем, чтобы пользователь понял, почему файл не в плейлисте.
+MUSIC_SKIP_EXT = (".flac", ".wav", ".wma", ".aiff", ".m4b")
 # имя не должно вылезать за пределы папки
 MUSIC_NAME_RE = re.compile(r"^[^/\\]{1,180}$")
 # снимок активных таймеров: чтобы отличить «истёк» от «его не было»
@@ -585,18 +591,27 @@ _fired_last = [0]
 
 def _list_music():
     out = []
+    skipped = []
     try:
         for n in sorted(os.listdir(MUSIC_DIR)):
-            if n.lower().endswith(MUSIC_EXT) and not n.startswith("."):
-                try:
-                    size = os.path.getsize(os.path.join(MUSIC_DIR, n))
-                except OSError:
-                    continue
-                out.append({"name": n, "size": size,
-                            "title": os.path.splitext(n)[0].replace("_", " ")})
+            low = n.lower()
+            if low.startswith("."):
+                continue
+            if low.endswith(MUSIC_SKIP_EXT):
+                skipped.append(n)
+                continue
+            if not low.endswith(MUSIC_EXT):
+                continue
+            try:
+                size = os.path.getsize(os.path.join(MUSIC_DIR, n))
+            except OSError:
+                continue
+            out.append({"name": n, "size": size,
+                        "title": os.path.splitext(n)[0].replace("_", " ")})
     except Exception as e:
-        return {"error": str(e), "tracks": []}
-    return {"tracks": out, "count": len(out), "dir": MUSIC_DIR}
+        return {"error": str(e), "tracks": [], "skipped": []}
+    return {"tracks": out, "count": len(out), "dir": MUSIC_DIR,
+            "skipped": skipped, "skipped_count": len(skipped)}
 
 
 _RU_NUM = {
@@ -971,9 +986,16 @@ async def music_file(name: str, request: Request):
         raise HTTPException(404, "нет такого файла: %s" % name)
 
     ext = os.path.splitext(name)[1].lower()
+    if ext in MUSIC_SKIP_EXT:
+        # Отказ внятнее молчания: файл в плейлисте не зазвучит, и без
+        # объяснения это выглядит как поломка плеера.
+        raise HTTPException(415, "браузер не играет %s - сконвертируй в mp3 "
+                                   "или ogg (ffmpeg -i '%s' -b:a 192k out.mp3)"
+                                   % (ext, name))
+    if not ext.endswith(MUSIC_EXT):
+        raise HTTPException(415, "неподдерживаемый формат: %s" % ext)
     mime = {".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".aac": "audio/aac",
-            ".ogg": "audio/ogg", ".opus": "audio/ogg", ".flac": "audio/flac",
-            ".wav": "audio/wav", ".wma": "audio/x-ms-wma"}.get(ext, "application/octet-stream")
+            ".ogg": "audio/ogg", ".opus": "audio/ogg"}.get(ext, "application/octet-stream")
 
     size = os.path.getsize(path)
     # <audio> просит Range, без него не работает перемотка

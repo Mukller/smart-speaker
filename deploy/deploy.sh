@@ -232,6 +232,43 @@ for rel in webapi_client/index.html webapi_client/manifest.json \
     ok "$rel"
 done
 
+# Плагины. Раньше в гит попадал только plugin_greetings.py, а остальные
+# жили исключительно в контейнере: их нельзя было ни прочитать, ни починить,
+# ни воспроизвести при пересоздании. Копируем каталог целиком; удалять
+# ничего не будем, docker cp только перезаписывает, поэтому файл, которого
+# в репозитории нет, в контейнере сохранится.
+if [ -d "$VENDOR/plugins" ]; then
+    n=$(find "$VENDOR/plugins" -maxdepth 1 -name '*.py' | wc -l)
+    if [ "$n" -gt 0 ]; then
+        if timeout 180 docker cp "$VENDOR/plugins/." \
+                "$CONTAINER:/app/vendor/irene-va/plugins/"; then
+            ok "плагинов скопировано: $n"
+        else
+            bad "плагины не скопированы"
+        fi
+        # Шаг 1d/5 отключает эти плагины, но он отрабатывает ДО копирования,
+        # и копия возвращает их на место. Из-за этого в логе появлялись две
+        # ошибки загрузки. Повторяем отключение здесь, чтобы порядок шагов
+        # не влиял на результат.
+        timeout 120 docker exec "$CONTAINER" sh -c '
+          for p in plugin_mediacmds plugin_playwav_audioplayer; do
+            if [ -f "/app/vendor/irene-va/plugins/$p.py" ]; then
+              mkdir -p /app/vendor/irene-va/plugins_inactive
+              mv -f "/app/vendor/irene-va/plugins/$p.py" \
+                    "/app/vendor/irene-va/plugins_inactive/$p.py" \
+                    && echo "    выключен после копирования: $p"
+            fi
+            # Переноса исходника мало: в __pycache__ остаётся .pyc, и ядро
+            # грузит плагин именно оттуда - ошибка загрузки возвращалась
+            # при каждом старте, хотя .py в plugins/ уже не было.
+            rm -f "/app/vendor/irene-va/plugins/__pycache__/$p."*.pyc
+          done
+          rm -rf /app/vendor/irene-va/plugins/__pycache__' 2>&1 | sed 's/^/  /'
+    else
+        bad "в plugins/ нет ни одного .py"
+    fi
+fi
+
 # Секрет канала будильника лежит только на сервере и в гит не попадает.
 # Копируем отдельно и только если файл есть: колонка обязана работать и без
 # Telegram, просто тогда будильник слышен исключительно в браузере.
@@ -297,9 +334,30 @@ else
     sleep 3
 fi
 
+
 # -----------------------------------------------------------------------------
 say "5/5 проверки"
 fails=0
+
+# Плагины читаются при старте ядра, поэтому о ошибках узнаём только сейчас.
+# Раньше это проверялось вручную, а поломка выглядела как «плагин молча
+# исчез»: список сокращался, и в логе деплоя не оставалось ни следa.
+# Считаем ошибки только с момента ТЕКУЩЕГО старта: окно в 5 минут захватывало
+# лог предыдущего запуска и показывало уже исправленные ошибки - проверка
+# врала ровно тогда, когда всё было починено.
+started=$(timeout 60 docker inspect -f '{{.State.StartedAt}}' "$CONTAINER" 2>/dev/null || echo "")
+if [ -n "$started" ]; then
+    pj=$(timeout 60 docker logs "$CONTAINER" --since "$started" 2>&1 \
+         | grep -c 'JAA PLUGIN ERROR' || true)
+    [ "${pj:-0}" -eq 0 ] && ok "ошибок загрузки плагинов нет" \
+        || { bad "ошибок загрузки плагинов: $pj"; fails=1; }
+else
+    warn "не удалось узнать время старта контейнера - пропускаю проверку плагинов"
+fi
+
+pc=$(curl -s --max-time 20 "$API/plugins" | tr ',' '\n' | grep -c '"name"' || true)
+[ "${pc:-0}" -ge 8 ] && ok "плагинов в списке: $pc" \
+    || { bad "плагинов в списке всего $pc - часть выпала"; fails=1; }
 
 code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
        --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/kolonka/" || echo 000)
