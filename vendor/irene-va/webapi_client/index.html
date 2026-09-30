@@ -552,6 +552,11 @@ function renderPlayer() {
 }
 
 async function doSearch(source) {
+  // Выбор источника запоминаем сразу, до всех ранних выходов. Раньше это
+  // стояло ниже проверки пустого поля, и нажатие на «Превью 30 с» с пустым
+  // поиском молча ничего не меняло: пользователь выбирал iTunes, вводил
+  // запрос и получал результаты из архива.
+  if (source) searchSrc = source;
   const inp = $("searchInput");
   const q = inp ? inp.value.trim() : "";
   const box = $("searchResults");
