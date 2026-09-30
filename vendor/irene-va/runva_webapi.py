@@ -441,6 +441,8 @@ def _tts_wav_bytes(text, speaker_id=0):
 
 @app.get("/tts")
 async def tts(text: str, speaker_id: int = 0):
+    if not _rate_limit("tts", RL_LIMIT_TTS):
+        raise HTTPException(429, "слишком много запросов синтеза, подожди минуту")
     text = (text or "").strip()
     if not text:
         raise HTTPException(400, "пустой текст")
@@ -455,6 +457,115 @@ async def tts(text: str, speaker_id: int = 0):
         raise HTTPException(500, "синтез не удался: %s" % e)
     return Response(content=wav, media_type="audio/wav",
                     headers={"Cache-Control": "no-store"})
+
+
+# Таймеры живут в памяти ядра, поэтому перезапуск контейнера их убивал:
+# будильник молча исчезал, и единственный след - его не стало. Храним
+# активные таймеры в томе опций и восстанавливаем при старте.
+HERE_DIR = os.path.dirname(os.path.abspath(__file__))
+OPTIONS_DIR = os.path.join(HERE_DIR, "options")
+TIMER_STATE = os.path.join(OPTIONS_DIR, "webapi_timers.json")
+# Таймер, истёкший пока контейнер лежал, поднимаем только если это свежее:
+# иначе после возвращения через сутки звонок сработал бы немедленно.
+RESTORE_GRACE = 3600
+_timer_state_blob = [None]
+_timer_restored = [False]
+# ковши ограничителя: ключ (корзина, IP) -> (запросов, время окна)
+_rl = {}
+_rl_lock = threading.Lock()
+# лимиты в запросов в минуту на IP; 0 отключает ограничение
+RL_LIMIT_CMD = int(os.environ.get("JANE_RL_CMD", "30") or 30)
+RL_LIMIT_TTS = int(os.environ.get("JANE_RL_TTS", "60") or 60)
+RL_LIMIT_STT = int(os.environ.get("JANE_RL_STT", "60") or 60)
+
+
+def _persist_timers():
+    """Пишем только при изменении: иначе диск пишется каждые две секунды."""
+    try:
+        slots = list(getattr(core, "timers", []) or [])
+        durs = list(getattr(core, "timersDuration", []) or [])
+        active = []
+        for i, end in enumerate(slots):
+            if end and end > 0:
+                d = int(durs[i]) if i < len(durs) and durs[i] else 0
+                active.append({"i": i, "at": int(end), "total": d})
+        blob = json.dumps({"saved": int(time.time()), "active": active})
+        if blob != _timer_state_blob[0]:
+            with open(TIMER_STATE, "w", encoding="utf-8") as f:
+                f.write(blob)
+            _timer_state_blob[0] = blob
+    except Exception:
+        pass
+
+
+def _restore_timers():
+    """Возвращает таймеры, пережившие перезапуск. Вызывается один раз."""
+    if _timer_restored[0]:
+        return 0
+    _timer_restored[0] = True
+    try:
+        with open(TIMER_STATE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return 0
+    now = time.time()
+    try:
+        slots = list(getattr(core, "timers", []) or [])
+        durs = list(getattr(core, "timersDuration", []) or [])
+    except Exception:
+        return 0
+    while len(slots) < 8:
+        slots.append(0)
+    while len(durs) < 8:
+        durs.append(0)
+    n = 0
+    for item in data.get("active") or []:
+        try:
+            i, at = int(item.get("i", -1)), int(item.get("at", 0))
+        except Exception:
+            continue
+        if not (0 <= i < len(slots)) or at <= 0:
+            continue
+        if at + RESTORE_GRACE < now:
+            continue          # протух, пока лежали - молчаливый звонок
+        slots[i] = at
+        if item.get("total"):
+            durs[i] = int(item["total"])
+        n += 1
+    if n:
+        core.timers = slots
+        core.timersDuration = durs
+    return n
+
+
+def _rate_limit(bucket, limit):
+    """Простейший ковш токенов по IP. Возвращает True, если запрос прошёл.
+
+    Зачем при живом приложении: API колонки открыт в интернет, и без
+    ограничения любой может вызывать sendTxtCmd и жечь LLM-кредиты из
+    core.json, а /tts и /stt нагружать процессор. Секрет во фронтенде от
+    этого не спасает - он виден в исходнике страницы, поэтому ограничиваем
+    ущерб, а не прячем функциональность.
+    """
+    try:
+        client = request.client.host if request else "-"
+    except Exception:
+        client = "-"
+    key = (bucket, client)
+    try:
+        limit = int(limit)
+    except Exception:
+        limit = 0
+    if limit <= 0:
+        return True
+    now = time.time()
+    with _rl_lock:
+        n, t0 = _rl.get(key, (0, now))
+        if now - t0 >= 60.0:
+            n, t0 = 0, now
+        n += 1
+        _rl[key] = (n, t0)
+    return n <= limit
 
 
 @app.get("/audioHealth")
@@ -601,6 +712,8 @@ def _stt_ready():
 
 @app.post("/stt")
 async def stt(request: Request):
+    if not _rate_limit("stt", RL_LIMIT_STT):
+        raise HTTPException(429, "слишком много запросов распознавания, подожди минуту")
     body = await request.body()
     if not body:
         raise HTTPException(400, "пустой аудиопоток")
@@ -1346,6 +1459,8 @@ def _human_duration(secs):
 
 @app.get("/sendTxtCmd")
 async def sendSimpleTxtCmd(cmd:str,returnFormat:str = "saytxt"):
+    if not _rate_limit("cmd", RL_LIMIT_CMD):
+        raise HTTPException(429, "слишком много команд, подожди минуту")
     player = _player_command(cmd)
     if player is not None:
         reply, action = player
@@ -1360,6 +1475,9 @@ async def sendSimpleTxtCmd(cmd:str,returnFormat:str = "saytxt"):
 async def sendSimpleTxtCmdStream(cmd:str, model:str = "qwen2.5:0.5b-instruct"):
     from starlette.responses import StreamingResponse
     import asyncio
+
+    if not _rate_limit("cmd", RL_LIMIT_CMD):
+        raise HTTPException(429, "слишком много команд, подожди минуту")
 
     async def event_generator():
         # Плеер: действие возвращаем структурно, интерфейс его выполнит
@@ -1435,6 +1553,10 @@ async def app_timers():
         # здесь срабатывание происходит по-настоящему, поэтому ловим его
         # здесь, а не когда клиент откроет страницу
         _check_fired()
+        # таймер, переживший перезапуск, возвращаем до того, как ядро
+        # начнёт гасить слоты, иначе он сгорит как просроченный
+        _restore_timers()
+        _persist_timers()
 
 if __name__ == "__main__":
 
