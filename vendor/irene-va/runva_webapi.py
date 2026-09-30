@@ -570,6 +570,10 @@ MUSIC_NAME_RE = re.compile(r"^[^/\\]{1,180}$")
 _timer_seen = {}
 # ядро не заполняет timersDuration, поэтому длительность помним сами
 _timer_total = {}
+# счётчик срабатываний: клиент присылает, сколько уже видел, поэтому
+# пропущенный звонок не теряется при закрытой вкладке
+_fired_count = [0]
+_fired_last = [0]
 
 
 def _list_music():
@@ -666,13 +670,39 @@ def _parse_duration(text):
     return total if found and total > 0 else None
 
 
-@app.get("/timers")
-async def timers():
-    """Активные таймеры и те, что сработали с прошлого опроса.
+def _check_fired():
+    """Ловит момент срабатывания таймера.
 
-    Звук будильника в контейнере играть нечем (нет /dev/snd), поэтому
-    сообщаем браузеру, что таймер истёк, и отдаём сам wav: звонок звучит
-    на устройстве пользователя.
+    Важно: это д��лжно происходить на серверном цикле, а не в опросе
+    клиента. Ядро гасит слот сам - по своему циклу раз в 2 секунды. Если
+    переход «был активен -> стал пуст» наблюдать только при обращении
+    клиента, то звонок, случившийся при закрытой вкладке, не отмечался
+    вовсе: между срабатыванием и следующим запросом состояние уже
+    «неактивно» и сравнивать не с чем. Счётчик рос через раз.
+    """
+    try:
+        slots = list(getattr(core, "timers", []) or [])
+    except Exception:
+        return
+    for i, end in enumerate(slots):
+        was = _timer_seen.get(i)
+        if was and (not end or end <= 0):
+            _fired_count[0] += 1
+            _fired_last[0] = int(time.time())
+    _timer_seen.clear()
+    _timer_total.clear()
+    for i, end in enumerate(slots):
+        if end and end > 0:
+            _timer_seen[i] = end
+
+
+@app.get("/timers")
+async def timers(seen: int = 0):
+    """Активные таймеры и звонки, которые клиент ещё не видел.
+
+    Звонок считается «просмотренным» по номеру: клиент хранит у себя
+    последний обработанный номер. Так пропущенный звонок переживает
+    закрытую вкладку - сервер помнит счётчик, а не последний запрос.
     """
     now = time.time()
     active = []
@@ -690,18 +720,23 @@ async def timers():
             active.append({"id": i, "left": int(end - now),
                            "total": dur or int(_timer_total.get(i, 0))})
 
-    fired = []
-    for i, end in enumerate(slots):
-        was = _timer_seen.get(i)
-        if was and (not end or end <= 0):
-            fired.append({"id": i, "after": int(was)})
-    _timer_seen.clear()
-    for i, end in enumerate(slots):
+    # звонок засчитывает серверный цикл, но проверяем и здесь: если слот
+    # погас между тиками, покажем это текущему клиенту сразу
+    _check_fired()
+    for i, end in enumerate(list(getattr(core, "timers", []) or [])):
         if end and end > 0:
-            _timer_seen[i] = end
-            _timer_total.setdefault(i, 0)
+            try:
+                dur = int((getattr(core, "timersDuration", []) or [0] * 8)[i] or 0)
+            except Exception:
+                dur = 0
+            _timer_total.setdefault(i, dur)
 
-    return {"active": active, "fired": fired, "now": int(now)}
+    missed = []
+    if int(seen or 0) < _fired_count[0]:
+        missed = [{"n": _fired_count[0], "at": _fired_last[0]}]
+
+    return {"active": active, "missed": missed, "fired": missed,
+            "fired_count": _fired_count[0], "now": int(now)}
 
 
 @app.get("/timerwav")
@@ -1187,6 +1222,9 @@ async def app_timers():
     if core != None:
         #print("update timers")
         core._update_timers()
+        # здесь срабатывание происходит по-настоящему, поэтому ловим его
+        # здесь, а не когда клиент откроет страницу
+        _check_fired()
 
 if __name__ == "__main__":
 

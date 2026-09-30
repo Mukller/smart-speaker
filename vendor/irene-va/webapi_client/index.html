@@ -5,6 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <!-- пустая data-иконка: иначе браузер шлет запрос /favicon.ico и получает 404 -->
 <link rel="icon" href="data:,">
+<link rel="manifest" href="manifest.json">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0b0b0c">
 <title>Дженет</title>
 <style>
   :root {
@@ -406,13 +410,50 @@ function renderAlarm() {
 
 async function pollTimers() {
   try {
-    const r = await fetch(API + "/timers");
+    // Сервер отдаёт звонки, номер которых больше уже обработанного, поэтому
+    // пропущенный звонок переживает закрытую вкладку. «Только что
+    // сработало, мы были на связи» отличаем от «сработало, пока вкладка
+    // лежала» по времени события, а не вторым счётчиком.
+    const handled = readState("dzh_fired", 0);
+    const r = await fetch(API + "/timers?seen=" + handled);
     if (!r.ok) return;
     const d = await r.json();
     alarm.active = d.active || [];
-    if ((d.fired || []).length) ringAlarm();
+
+    const n = d.fired_count || 0;
+    if (n > handled && (d.missed || []).length) {
+      const at = d.missed[0].at || 0;
+      if ((d.now - at) < 12) {
+        ringAlarm();
+      } else {
+        const when = at ? new Date(at * 1000).toLocaleTimeString("ru-RU",
+            { hour: "2-digit", minute: "2-digit" }) : "";
+        addMsg("Будильник сработал в " + when
+               + ", пока вкладка была закрыта.", "system");
+        speak("Таймер сработал");
+      }
+      writeState("dzh_fired", n);
+    }
+
     renderAlarm();
+    keepAwake();
   } catch (e) { /* сеть моргнула */ }
+}
+
+/* Экран не должен засыпать, пока колонка слушает или ждёт звонка:
+   с выключенным экраном браузер отпускает микрофон и всё замолкает. */
+let wakeLock = null;
+async function keepAwake() {
+  const need = hot.on || alarm.active.length > 0;
+  if (need && !wakeLock && "wakeLock" in navigator) {
+    try {
+      wakeLock = await navigator.wakeLock.request("screen");
+      wakeLock.addEventListener("release", () => { wakeLock = null; });
+    } catch (e) { /* браузер может запретить, не критично */ }
+  } else if (!need && wakeLock) {
+    try { await wakeLock.release(); } catch (e) {}
+    wakeLock = null;
+  }
 }
 
 function ringAlarm() {

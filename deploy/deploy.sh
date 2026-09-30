@@ -222,7 +222,9 @@ say "2/5 файлы внутри контейнера"
 # Файлы НЕ монтируются в контейнер (в compose только тома options и models),
 # поэтому каждый раз копируем вручную, иначе контейнер продолжит отдавать
 # старый код.
-for rel in webapi_client/index.html plugins/plugin_greetings.py \
+for rel in webapi_client/index.html webapi_client/manifest.json \
+           webapi_client/icon.svg \
+           plugins/plugin_greetings.py \
            voice_profiles.json runva_webapi.py; do
     [ -f "$VENDOR/$rel" ] || { warn "нет файла $rel — пропускаю"; continue; }
     docker cp "$VENDOR/$rel" "$CONTAINER:/app/vendor/irene-va/$rel" \

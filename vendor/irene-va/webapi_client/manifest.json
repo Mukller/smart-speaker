@@ -1,0 +1,20 @@
+{
+  "name": "Дженет — голосовой помощник",
+  "short_name": "Дженет",
+  "description": "Голосовая колонка: слушает, отвечает голосом, ставит будильник и играет музыку",
+  "lang": "ru",
+  "start_url": "../",
+  "scope": "../",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#0b0b0c",
+  "theme_color": "#0b0b0c",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
