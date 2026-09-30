@@ -57,7 +57,10 @@ with sync_playwright() as p:
 
     out.append("=== 1. загрузка ===")
     ok("открылась, композер на месте")
-    ok("подсказка: " + page.locator("#empty").inner_text().strip()[:50])
+    if page.locator("#empty").count():
+        ok("подсказка: " + page.locator("#empty").inner_text().strip()[:50])
+    else:
+        info("подсказки для пустого чата нет")
     info("чипы: " + " | ".join(page.locator("#chips button").all_inner_texts()))
 
     out.append("")

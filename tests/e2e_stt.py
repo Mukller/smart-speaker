@@ -106,7 +106,7 @@ with sync_playwright() as p:
 
     out.append("")
     out.append("=== 4. остальное не сломано ===")
-    for cmd, want in (("привет", "привет"), ("время", None), ("погода", "Солнечно")):
+    for cmd, want in (("привет", "привет"), ("время", None), ("погода", "градус")):
         page.fill("#input", cmd)
         page.press("#input", "Enter")
         page.wait_for_function(

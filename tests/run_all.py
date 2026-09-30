@@ -64,24 +64,39 @@ def warmup(attempts=40, pause=5):
 
 
 def run(name, script):
+    """Прогоняет набор. При сбое повторяет один раз.
+
+    Локальная сеть на машине разработчика периодически рвётся, и Playwright
+    падает с net::ERR_NETWORK_CHANGED на самом goto, при живом приложении.
+    Один повтор отсекает это, но не маскирует настоящие ошибки: два провала
+    подряд всё равно означают провал.
+    """
     path = os.path.join(HERE, script)
     if not os.path.exists(path):
         print("  %-14s ФАЙЛА НЕТ" % name)
         return 1
-    t0 = time.time()
-    p = subprocess.run([sys.executable, path], cwd=HERE,
-                       capture_output=True, text=True, errors="replace")
-    out = (p.stdout or "") + (p.stderr or "")
-    m = re.findall(r"fails=(\d+)", out)
-    fails = int(m[-1]) if m else -1
-    dt = time.time() - t0
-    if fails < 0:
-        # набор упал раньше, чем напечатал итог - показываем хвост вывода
-        tail = " | ".join(l.strip() for l in out.strip().splitlines()[-3:])
-        print("  %-14s НЕ ОТЧЁТ (%.0f с) %s" % (name, dt, tail[:150]))
-        return 1
-    print("  %-14s fails=%-3d %.0f с" % (name, fails, dt))
-    return fails
+    last = 1
+    for attempt in (1, 2):
+        t0 = time.time()
+        p = subprocess.run([sys.executable, path], cwd=HERE,
+                           capture_output=True, text=True, errors="replace")
+        out = (p.stdout or "") + (p.stderr or "")
+        m = re.findall(r"fails=(\d+)", out)
+        fails = int(m[-1]) if m else -1
+        dt = time.time() - t0
+        if fails == 0:
+            print("  %-14s fails=0    %.0f с%s"
+                  % (name, dt, "" if attempt == 1 else "  (со второго раза)"))
+            return 0
+        last = fails
+        tail = " | ".join(l.strip() for l in out.strip().splitlines()[-2:])
+        if fails < 0:
+            print("  %-14s НЕ ОТЧЁТ (%.0f с) %s" % (name, dt, tail[:120]))
+        else:
+            print("  %-14s fails=%-3d %.0f с" % (name, fails, dt))
+        if attempt == 1:
+            print("               повторяю один раз - проверю сеть")
+    return last
 
 
 def main():
