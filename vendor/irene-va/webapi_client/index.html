@@ -582,7 +582,23 @@ async function doSearch(source) {
   try {
     const r = await fetch(API + "/music/search?q=" + encodeURIComponent(q) +
                           "&source=" + src + "&limit=10");
-    if (!r.ok) throw new Error("HTTP " + r.status);
+    // Сервер присылает причину в detail: при 429 это «подожди минуту».
+    // Раньше это превращалось в «ничего не нашлось», то есть человек искал
+    // исправление там, где его нет, - источник просто отказал по лимиту.
+    if (!r.ok) {
+      let why = "ошибка " + r.status;
+      try {
+        const j = await r.json();
+        if (j && j.detail) why = j.detail;
+      } catch (e) { }
+      // через textContent, а не innerHTML: текст приходит с сервера
+      const e1 = document.createElement("div");
+      e1.className = "pl-note";
+      e1.textContent = why;
+      box.innerHTML = "";
+      box.appendChild(e1);
+      return;
+    }
     const d = await r.json();
     // пока шёл поиск, мог начаться новый - тогда этот результат уже неактуален
     if (seq !== searchSeq) return;

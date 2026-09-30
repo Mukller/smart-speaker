@@ -477,6 +477,56 @@ _rl_lock = threading.Lock()
 RL_LIMIT_CMD = int(os.environ.get("JANE_RL_CMD", "30") or 30)
 RL_LIMIT_TTS = int(os.environ.get("JANE_RL_TTS", "60") or 60)
 RL_LIMIT_STT = int(os.environ.get("JANE_RL_STT", "60") or 60)
+RL_LIMIT_MUSIC = int(os.environ.get("JANE_RL_MUSIC", "20") or 20)
+# Потолок веера по метаданным на один поиск: каждый документ из ответа Solr
+# требует своего обращения к archive.org, и 40 запросов на один клик по
+# чужому сервису - это невежливо.
+META_FANOUT = int(os.environ.get("JANE_META_FANOUT", "12") or 12)
+META_TTL = 3600.0
+META_MAX = 400
+_meta_cache = {}
+# Кэш всего ответа поиска. Метаданные кэшируются по identifier, но основное
+# время съедает сам запрос к advancedsearch: повтор того же поиска стоил столько
+# же, сколько первый. Списком делится один и тот же текст.
+SEARCH_TTL = 300.0
+SEARCH_MAX = 100
+_search_cache = {}
+
+
+def _search_cached(key):
+    hit = _search_cache.get(key)
+    if not hit:
+        return None
+    ts, val = hit
+    if time.time() - ts > SEARCH_TTL:
+        _search_cache.pop(key, None)
+        return None
+    return val
+
+
+def _search_store(key, val):
+    if len(_search_cache) >= SEARCH_MAX:
+        for k in sorted(_search_cache, key=lambda x: _search_cache[x][0])[:40]:
+            _search_cache.pop(k, None)
+    _search_cache[key] = (time.time(), val)
+
+
+def _meta_cached(ident):
+    hit = _meta_cache.get(ident)
+    if not hit:
+        return None
+    ts, val = hit
+    if time.time() - ts > META_TTL:
+        _meta_cache.pop(ident, None)
+        return None
+    return val
+
+
+def _meta_store(ident, val):
+    if len(_meta_cache) >= META_MAX:
+        for k in sorted(_meta_cache, key=lambda x: _meta_cache[x][0])[:100]:
+            _meta_cache.pop(k, None)
+    _meta_cache[ident] = (time.time(), val)
 
 
 def _persist_timers():
@@ -1067,6 +1117,8 @@ async def timerwav():
 
 @app.get("/music/search")
 async def music_search(q: str = "", source: str = "archive", limit: int = 12):
+    # Поиск ходит на archive.org и iTunes. Без ограничения через открытый
+    # API можно было бы положить и чужой сервис, и процессор.
     """Поиск музыки в бесплатных источниках без ключей.
 
     Spotify, Yandex Music и SoundCloud бесплатного открытого API для
@@ -1083,6 +1135,16 @@ async def music_search(q: str = "", source: str = "archive", limit: int = 12):
     if len(q) < 2:
         raise HTTPException(400, "запрос слишком короткий")
     limit = max(1, min(int(limit or 12), 25))
+    # Лимит после проверки запроса: пустые и заведомо ошибочные обращения
+    # не должны расходовать ковш.
+    if not _rate_limit("music", RL_LIMIT_MUSIC):
+        raise HTTPException(429, "слишком много поисков, подожди минуту")
+    key = (source, q.lower(), limit)
+    cached = _search_cached(key)
+    if cached is not None:
+        out = dict(cached)
+        out["cached"] = True
+        return out
     ses = _ollama_session          # переиспользуем сессию с повторами
 
     def _get(url, params=None, timeout=12):
@@ -1118,14 +1180,48 @@ async def music_search(q: str = "", source: str = "archive", limit: int = 12):
             "fl[]": "identifier", "rows": limit * 4, "output": "json"})
         scanned = 0
         skipped = 0
-        for doc in ((d or {}).get("response", {}).get("docs") or []):
+        # Веер по метаданным ограничен: на каждый документ из ответа Solr
+        # уходит свой запрос на archive.org, а документов бывает limit*4.
+        # Без потолка один поиск означал десятки обращений к чужому сервису.
+        # Метаданные забираем пачкой параллельно: по одному archive.org
+        # отвечает по полторы-две секунды, и последовательный обход двенадцати
+        # документов растягивал поиск на 20-30 секунд.
+        docs = [x for x in ((d or {}).get("response", {}).get("docs") or [])
+                if x.get("identifier")]
+        scanned = len(docs)
+        docs = docs[:max(limit * 4, META_FANOUT)]
+
+        fresh = []
+        need = []
+        for doc in docs:
+            ident = doc["identifier"]
+            hit = _meta_cached(ident)
+            if hit is not None:
+                fresh.append((doc, hit))
+            else:
+                need.append(ident)
+        need = need[:META_FANOUT]
+        if need:
+            def grab(ident):
+                return ident, _get("https://archive.org/metadata/" + ident,
+                                   timeout=10)
+            try:
+                from concurrent.futures import ThreadPoolExecutor
+                with ThreadPoolExecutor(max_workers=6) as ex:
+                    for ident, meta in ex.map(grab, need):
+                        _meta_store(ident, meta)
+                        fresh.append(({"identifier": ident}, meta))
+            except Exception:
+                for ident in need:
+                    meta = _get("https://archive.org/metadata/" + ident,
+                                timeout=10)
+                    _meta_store(ident, meta)
+                    fresh.append(({"identifier": ident}, meta))
+
+        for doc, meta in fresh:
             if len(out) >= limit:
                 break
             ident = doc.get("identifier")
-            if not ident:
-                continue
-            scanned += 1
-            meta = _get("https://archive.org/metadata/" + ident, timeout=10)
             if not meta:
                 skipped += 1
                 continue
@@ -1159,8 +1255,10 @@ async def music_search(q: str = "", source: str = "archive", limit: int = 12):
         scanned_info = {"scanned": scanned, "skipped": skipped,
                         "found": ((d or {}).get("response", {}) or {}).get("numFound")}
 
-    return {"source": source, "query": q, "count": len(out), "results": out,
-            "diag": scanned_info}
+    result = {"source": source, "query": q, "count": len(out), "results": out,
+              "diag": scanned_info, "cached": False}
+    _search_store(key, result)
+    return result
 
 
 @app.get("/music")
