@@ -16,6 +16,7 @@ from termcolor import cprint
 import json
 import re
 from starlette.websockets import WebSocket
+from starlette.concurrency import run_in_threadpool
 
 # try:
 #     from fastapi_utils.tasks import repeat_every
@@ -805,6 +806,243 @@ async def sttHealth():
 
 
 # ---------------------------------------------------------------------------
+# Канал устройства: непрерывный поток аудио на вход, текст и звук на выход.
+#
+# Зачем он, если есть /stt: браузер присылает нарезки по кнопке, а колонка
+# должна слушать всегда. Плата (а позже и ESP32) держит одно соединение и
+# шлёт куски PCM, сервер сам понимает, где человек закончил говорить, и
+# отвечает голосом. Никакой кнопки и никакой вкладки.
+#
+# Первым кадром плата обязана прислать hello с частотой: {"type":"hello",
+# "rate":16000,"wake":"дженет"}. Ключ wake необязателен - без него колонка
+# отвечает на любую речь, как и сейчас в браузере.
+# ---------------------------------------------------------------------------
+STT_RATE = 16000          # во что переводим любой вход
+DEV_VAD_FRAME = 480       # 30 мс при 16 кГц
+DEV_VAD_HANGOVER = 26     # сколько тихих кадров ждём перед концом фразы
+DEV_VAD_MAX_FRAMES = 500  # предохранитель: 15 секунд непрерывного шума
+DEV_WAKE_DEFAULT = "дженет"
+
+_dev_clients = {}
+_dev_seq = [0]
+# на сколько ушли звонки будильника: счётчик растёт, а отправлять надо один раз
+_fired_sent = [0]
+
+
+def _pcm_resample(data, src, dst):
+    """Линейный пересчёт PCM s16le. Микрофон платы не обязан уметь 16 кГц,
+    и требовать от железа конкретную частоту значит отказывать половине
+    модулей, поэтому пересчитываем на сервере."""
+    if not data or src == dst:
+        return data
+    import numpy as np
+    x = np.frombuffer(data, dtype="<i2").astype(np.float32)
+    if x.size == 0:
+        return b""
+    n = int(x.size * dst / float(src))
+    if n < 2:
+        return b""
+    grid = np.linspace(0, x.size - 1, n, dtype=np.float32)
+    return np.interp(grid, np.arange(x.size, dtype=np.float32),
+                     x).astype("<i2").tobytes()
+
+
+def _rms_peak(data):
+    """Громкость кадра: среднеквадратичная и пик."""
+    import numpy as np
+    x = np.frombuffer(data, dtype="<i2").astype(np.float32)
+    if x.size == 0:
+        return 0.0, 0.0
+    return float(np.sqrt(np.mean(x * x))), float(np.max(np.abs(x)))
+
+
+class _SpeechGate:
+    """Решает, где кончилась фраза. webrtcvad в контейнере нет, поэтому
+    энергия: порог плывёт вместе с шумом комнаты, а после тишины держится
+    задержка, чтобы не резать фразу на паузе между словами.
+
+    Кусок приходящего аудио режется на кадры по 30 мс внутри, иначе счётчик
+    тишины считает куски, а не время. Тогда пауза в 780 мс распознавалась бы
+    только при определённом размере куска: плата с 20 мс считала бы паузу в
+    15 раз быстрее, с 500 мс - в 15 раз медленнее, и будильник молчал бы.
+    """
+
+    def __init__(self, speech_floor=500.0, ratio=3.0):
+        self.frame_bytes = DEV_VAD_FRAME * 2
+        self.floor = speech_floor
+        self.ratio = ratio
+        self.active = False
+        self.loud_run = 0
+        self.quiet = 0
+        self.frames = 0
+        self.buf = bytearray()
+        self.pending = bytearray()
+
+    def push(self, data):
+        """Возвращает True, когда фраза только что закончилась."""
+        self.buf += data
+        self.pending += data
+        while len(self.pending) >= self.frame_bytes:
+            frame = bytes(self.pending[:self.frame_bytes])
+            del self.pending[:self.frame_bytes]
+            if self._frame(frame):
+                return True
+        return False
+
+    def _frame(self, frame):
+        self.frames += 1
+        rms, peak = _rms_peak(frame)
+        # фон подстраивается только пока никто не говорит, иначе колонка
+        # привыкает к собственному голосу и перестаёт его слышать
+        if not self.active and rms < self.floor:
+            self.floor = max(300.0, min(self.floor, rms * 1.2 + 60.0))
+        loud = rms > self.floor * self.ratio or peak > 12000.0
+        if loud:
+            self.loud_run += 1
+        else:
+            self.loud_run = 0
+        # Открываем фразу только после двух громких кадров подряд. Без этого
+        # щелчок или первый слог давали короткий обрывок: на синтезе фраза
+        # «какая сейчас погода» распадалась на «как» и «да я сейчас по».
+        if not self.active and self.loud_run >= 2:
+            self.active = True
+            self.quiet = 0
+        elif self.active and loud:
+            self.quiet = 0
+        elif self.active:
+            self.quiet += 1
+        if self.active and self.quiet >= DEV_VAD_HANGOVER:
+            return True
+        if self.active and self.frames >= DEV_VAD_MAX_FRAMES:
+            return True
+        return False
+
+    def take(self):
+        data = bytes(self.buf) + bytes(self.pending)
+        self.reset()
+        return data
+
+    def reset(self):
+        self.active = False
+        self.loud_run = 0
+        self.quiet = 0
+        self.frames = 0
+        self.buf = bytearray()
+        self.pending = bytearray()
+
+
+def _wake_ok(text, wake):
+    """Снимает будильниковое слово. Пустое будильниковое слово означает
+    «реагировать на всё»."""
+    t = (text or "").strip().lower()
+    if not wake:
+        return True, text or ""
+    for w in (wake if isinstance(wake, list) else [wake]):
+        w = (w or "").strip().lower()
+        if w and t.startswith(w):
+            return True, t[len(w):].strip()
+    return False, text or ""
+
+
+@app.get("/wsDevices")
+async def wsDevices():
+    """Кто подключён. Плата полезна тем же, что и страница: видно, что
+    канал жив, даже если вкладки нет."""
+    return {"devices": [{"id": k, "rate": v.get("rate"),
+                         "wake": v.get("wake"), "since": v.get("since")}
+                        for k, v in _dev_clients.items()],
+            "count": len(_dev_clients)}
+
+
+@app.websocket("/ws/device")
+async def ws_device(ws: WebSocket):
+    await ws.accept()
+    _dev_seq[0] += 1
+    dev_id = _dev_seq[0]
+    rate = STT_RATE
+    wake = DEV_WAKE_DEFAULT
+    gate = None
+    try:
+        await ws.send_text(json.dumps({
+            "type": "ready", "stt": _stt["loaded"], "tts": _tts["loaded"],
+            "id": dev_id, "want_rate": STT_RATE}))
+        if not _stt_ready():
+            await ws.send_text(json.dumps(
+                {"type": "error", "message": "распознавание не загружено"}))
+            return
+
+        while True:
+            msg = await ws.receive()
+            kind = msg.get("type")
+            if kind == "websocket.disconnect":
+                break
+            data = msg.get("bytes")
+            if kind == "websocket.receive" and data:
+                if gate is None:
+                    await ws.send_text(json.dumps(
+                        {"type": "error", "message": "сначала пришли hello"}))
+                    continue
+                pcm = _pcm_resample(data, rate, STT_RATE)
+                if not gate.push(pcm):
+                    continue
+                segment = gate.take()
+                if not segment:
+                    continue
+                text = await run_in_threadpool(_recognize_wav, segment, STT_RATE)
+                if not text:
+                    continue
+                ok, cmd = _wake_ok(text, wake)
+                await ws.send_text(json.dumps(
+                    {"type": "heard", "text": text, "wake": ok, "loud": True}))
+                if not ok or not cmd:
+                    continue
+                reply, source, action = await run_in_threadpool(
+                    _answer_text, cmd)
+                await ws.send_text(json.dumps(
+                    {"type": "text", "text": reply, "source": source,
+                     "action": action, "heard": cmd}))
+                try:
+                    wav = await run_in_threadpool(_tts_wav_bytes, reply)
+                    await ws.send_bytes(wav)
+                except Exception as e:
+                    await ws.send_text(json.dumps(
+                        {"type": "error", "message": "нет голоса: %s" % e}))
+                continue
+
+            if kind == "websocket.receive" and msg.get("text"):
+                raw = (msg.get("text") or "").strip()
+                try:
+                    hello = json.loads(raw)
+                except Exception:
+                    await ws.send_text(json.dumps(
+                        {"type": "error", "message": "hello должен быть json"}))
+                    continue
+                t = hello.get("type")
+                if t == "hello":
+                    try:
+                        rate = max(8000, min(int(hello.get("rate") or STT_RATE), 48000))
+                    except Exception:
+                        rate = STT_RATE
+                    wake = hello.get("wake", DEV_WAKE_DEFAULT)
+                    gate = _SpeechGate()
+                    _dev_clients[dev_id] = {"ws": ws, "rate": rate,
+                                            "wake": wake,
+                                            "since": int(time.time())}
+                    await ws.send_text(json.dumps({
+                        "type": "hello-ok", "id": dev_id, "want_rate": STT_RATE,
+                        "frame": DEV_VAD_FRAME * 2}))
+                elif t == "bye":
+                    break
+                else:
+                    await ws.send_text(json.dumps(
+                        {"type": "error", "message": "неизвестный тип: %s" % t}))
+    except Exception:
+        pass
+    finally:
+        _dev_clients.pop(dev_id, None)
+
+
+# ---------------------------------------------------------------------------
 # Плеер: список своих файлов и отдача их потоком.
 # В контейнере нет /dev/snd, звук играет браузер, поэтому сервер отдаёт файл,
 # а управление (громче/тише/вперёд/назад) приходит командами ассистента.
@@ -1451,18 +1689,29 @@ def _human_duration(secs):
     return "Поставлю таймер на %d %s" % (h, word)
 
 
+def _answer_text(cmd):
+    """Единый путь ответа на команду: плеер, потом плагины, потом модель.
+
+    Вынесено, чтобы канал устройства и браузер отвечали одинаково. Пока
+    каждый держал свою копию, правки расходились: в одном месте появлялась
+    команда, в другом нет.
+    """
+    player = _player_command(cmd)
+    if player is not None:
+        reply, action = player
+        return reply, "player", action
+    plugin_answer = _try_plugins(cmd)
+    if plugin_answer is not None:
+        return plugin_answer, "plugin", None
+    return call_ollama(cmd), "llm", None
+
+
 @app.get("/sendTxtCmd")
 async def sendSimpleTxtCmd(cmd:str,returnFormat:str = "saytxt"):
     if not _rate_limit("cmd", RL_LIMIT_CMD):
         raise HTTPException(429, "слишком много команд, подожди минуту")
-    player = _player_command(cmd)
-    if player is not None:
-        reply, action = player
-        return {"restxt": reply, "source": "player", "action": action}
-    plugin_answer = _try_plugins(cmd)
-    if plugin_answer is not None:
-        return {"restxt": plugin_answer, "source": "plugin"}
-    return {"restxt": call_ollama(cmd), "source": "llm"}
+    reply, source, action = await run_in_threadpool(_answer_text, cmd)
+    return {"restxt": reply, "source": source, "action": action}
 
 # Streaming endpoint: returns thinking + response as Server-Sent Events
 @app.get("/sendTxtCmdStream")
@@ -1551,6 +1800,39 @@ async def app_timers():
         # начнёт гасить слоты, иначе он сгорит как просроченный
         _restore_timers()
         _persist_timers()
+        # Звонок будильника уходит подключённой плате. Раньше звучал только
+        # браузер, и колонка без вкладки была беззвучной: будильник, ради
+        # которого всё затевалось, молчал именно там, где колонка нужна.
+        # Рассылка тут, в асинхронном цикле: слать из _check_fired нельзя,
+        # он синхронный.
+        if _fired_count[0] > _fired_sent[0]:
+            _fired_sent[0] = _fired_count[0]
+            await _ring_devices()
+        elif _fired_count[0] < _fired_sent[0]:
+            _fired_sent[0] = _fired_count[0]   # перезапуск обнулил счётчик
+
+
+async def _ring_devices():
+    """Отправляет подключённым устройствам сигнал будильника и его звук."""
+    if not _dev_clients:
+        return
+    note = json.dumps({"type": "alarm", "at": _fired_last[0],
+                       "fired": _fired_count[0]})
+    wav = None
+    try:
+        wav = await run_in_threadpool(_tts_wav_bytes, "Будильник!")
+    except Exception:
+        wav = None
+    for dev_id, dev in list(_dev_clients.items()):
+        ws = dev.get("ws")
+        if ws is None:
+            continue
+        try:
+            await ws.send_text(note)
+            if wav:
+                await ws.send_bytes(wav)
+        except Exception:
+            _dev_clients.pop(dev_id, None)
 
 if __name__ == "__main__":
 
