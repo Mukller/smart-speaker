@@ -54,6 +54,11 @@ jobs:
       - name: wake word waiting
         run: python vendor/irene-va/jane_wake.py
 
+      # Контекст разговора: «а в выходные?» продолжает тему, а не начинает
+      # новую. Чистая логика, поэтому проверяется без колонки.
+      - name: conversation context
+        run: python vendor/irene-va/jane_context.py
+
       # Детектор речи - чистая логика, ему не нужны ни модель, ни сеть.
       # Настройка порога тишины ломает фразы незаметно: заметить можно было
       # только живым разговором. Полный requirements.txt с torch и gradio

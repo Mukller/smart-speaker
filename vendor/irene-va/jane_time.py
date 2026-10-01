@@ -59,6 +59,9 @@ _WEEKDAY = {
 }
 _DOW = ("понедельник", "вторник", "среда", "четверг", "пятница",
         "суббота", "воскресенье")
+# Падеж для «буди в ...»: сказать «в пятница» нельзя, только «в пятницу».
+_DOW_ACC = ("понедельник", "вторник", "среду", "четверг", "пятницу",
+            "субботу", "воскресенье")
 
 # Из чего собирается будильник. «в» и «на» равнозначны: люди говорят оба.
 _HEAD = re.compile(
@@ -147,9 +150,18 @@ def parse_alarm_phrase(text, now=None):
         if rest.startswith(w):
             rest = rest[len(w):].strip()
             break
-    for wd in _WEEKDAY:
-        if rest.startswith(wd):
-            rest = rest[len(wd):].strip()
+    # Конкретный день недели. Раньше название вырезалось и тут же
+    # выбрасывалось: «буди в четверг в 8» ставил будильник на ближайшие 8,
+    # а не на четверг.
+    # Ищем в любом месте остатка, а не только в начале: «в 7 утра в четверг»
+    # - не менее естественный порядок, чем «в четверг в 7 утра», и раньше
+    # день просто оставался мусором в конце фразы.
+    want_dow = None
+    for wd in sorted(_WEEKDAY, key=len, reverse=True):
+        m = re.search(r"\b(%s)\b" % re.escape(wd), rest)
+        if m:
+            want_dow = _WEEKDAY[wd]
+            rest = (rest[:m.start()] + " " + rest[m.end():]).strip()
             break
     # после «завтра» остаётся «в 8 утра»: предлог уходит вместе с названием
     # дня, и его надо снять ещё раз, иначе разбор ждёт цифру в начале
@@ -174,12 +186,20 @@ def parse_alarm_phrase(text, now=None):
             delta = _DAY_WORDS.index(w) + 1
     target = base + datetime.timedelta(days=delta)
 
+    # Названный день недели сильнее «завтра»: «в четверг» про пятницу.
+    if want_dow is not None:
+        delta = (want_dow - now.weekday()) % 7
+        target = base + datetime.timedelta(days=delta)
+        # Сегодняшний день недели, но время уже ушло - ждём следующей недели.
+        if target <= now:
+            target += datetime.timedelta(days=7)
+
     # Время, которое уже прошло, переносим на следующий подходящий день -
     # и для повторяющегося тоже. Раньше перенос стоял под условием
     # «повтора нет», и «по будням на 6 утра» в десять утра получал время в
     # прошлом: будильник показывался с отрицательным остатком и срабатывал
     # сразу, вместо того чтобы ждать следующего понедельника.
-    if delta == 0 and target <= now:
+    elif delta == 0 and target <= now:
         target += datetime.timedelta(days=1)
     if repeat == "weekdays":
         while target.weekday() >= 5:
@@ -187,7 +207,12 @@ def parse_alarm_phrase(text, now=None):
     elif repeat == "weekend":
         while target.weekday() < 5:
             target += datetime.timedelta(days=1)
-    return int(target.timestamp()), "%02d:%02d" % (hour, minute), repeat
+    label = "%02d:%02d" % (hour, minute)
+    if want_dow is not None:
+        # Голосом без экрана надо сказать, в какой день, иначе «08:00»
+        # на понедельник и на четверг звучат одинаково.
+        label += " в " + _DOW_ACC[want_dow]
+    return int(target.timestamp()), label, repeat
 
 
 def describe_repeat(repeat):
@@ -265,6 +290,58 @@ def selfcheck():
             fails.append("повтор «по будням» попал на выходной: %s" % when)
         elif when.hour != 6:
             fails.append("время сдвинулось: %s" % when)
+
+    # Конкретный день недели. 1 октября 2026 - четверг.
+    # Раньше название дня вырезалось и выбрасывалось, поэтому «в четверг»
+    # означало ближайшие восемь утра, то есть пятницу.
+    got = parse_alarm_phrase("буди в четверг в 8 утра", at(2026, 10, 1, 6, 0))
+    if not got:
+        fails.append("день недели не разобран")
+    else:
+        when = _dt.datetime.fromtimestamp(got[0])
+        if when.date() != _dt.date(2026, 10, 1):
+            fails.append("«в четверг» ушло на %s, а сегодня четверг" % when.date())
+        if when.hour != 8:
+            fails.append("время сдвинулось: %s" % when)
+
+    # Сегодняшний четверг в девять утра, если сейчас шесть: девять ещё не
+    # прошло, значит сегодня и есть. Берём вечер, чтобы проверить перенос.
+    got = parse_alarm_phrase("буди в четверг в 9 утра", at(2026, 10, 1, 11, 0))
+    if got:
+        when = _dt.datetime.fromtimestamp(got[0])
+        if when.weekday() != 3 or when.date() != _dt.date(2026, 10, 8):
+            fails.append("прошедший четверг ждёт %s, а ждал 8 октября" % when)
+
+    # Суббота с понедельника - это через четыре дня, а не «ближайшая суббота
+    # когда попало» и уж точно не сегодня.
+    got = parse_alarm_phrase("буди в субботу в 10 утра", at(2026, 10, 5, 9, 0))
+    if got:
+        when = _dt.datetime.fromtimestamp(got[0])
+        if when.weekday() != 5:
+            fails.append("«в субботу» попало на %s" % when)
+
+    # Голосом без экрана «08:00» в понедельник и в четверг звучат одинаково,
+    # поэтому в подписи назван день.
+    got = parse_alarm_phrase("буди в пятницу в 8 утра", at(2026, 10, 1, 6, 0))
+    if got and "пятницу" not in got[1]:
+        fails.append("в подписи нет дня недели: %r" % (got[1],))
+
+    # День недели в конце фразы - не менее естественный порядок, чем в начале.
+    # Раньше он оставался мусором и просто терялся.
+    got = parse_alarm_phrase("поставь будильник на 7 утра в четверг",
+                             at(2026, 10, 1, 6, 0))
+    if not got:
+        fails.append("день недели в конце фразы не разобран")
+    elif got[0] != parse_alarm_phrase("буди в четверг в 7 утра",
+                                      at(2026, 10, 1, 6, 0))[0]:
+        fails.append("порядок слов меняет дату будильника")
+    elif "четверг" not in got[1]:
+        fails.append("в подписи нет дня: %r" % (got[1],))
+
+    # «вс» - это воскресенье, но «всё» - это не день недели.
+    got = parse_alarm_phrase("буди в 8 утра на всё", at(2026, 10, 1, 6, 0))
+    if got and "в " in got[1] and got[1].endswith(("вс",)):
+        fails.append("«всё» принято за воскресенье: %r" % (got[1],))
 
     for f in fails:
         print("FAIL  " + f)

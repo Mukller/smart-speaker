@@ -993,6 +993,25 @@ except ImportError:  # путь колонки не всегда в sys.path
     import sys
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from jane_wake import WakeState as _WakeState
+
+# Контекст разговора: «буди в семь», потом «а в выходные?». Тоже чистая
+# логика без сокета и без модели - иначе проверить её можно было бы только
+# вручную на живой колонке.
+try:
+    from jane_context import Context as _CTXClass
+    from jane_context import TOPIC_ALARM as _CTX_TOPIC_ALARM
+    from jane_context import topic_of as _topic_of
+    from jane_time import describe_repeat as _describe_repeat
+except ImportError:
+    import sys as _sys
+    _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from jane_context import Context as _CTXClass
+    from jane_context import TOPIC_ALARM as _CTX_TOPIC_ALARM
+    from jane_context import topic_of as _topic_of
+    from jane_time import describe_repeat as _describe_repeat
+
+# Контекст один на колонку: он и должен быть общим для браузера и платы.
+_CTX = _CTXClass()
 DEV_WAKE_DEFAULT = "дженет"
 
 _dev_clients = {}
@@ -1821,6 +1840,14 @@ def _answer_text(cmd):
     появлялась, в другом нет.
     """
     low = (cmd or "").lower().replace("ё", "е")
+    # Уточнение продолжает разговор, а не начинает новый: «буди в семь», а
+    # потом «а в выходные?» - это тот же час в другой повтор. Непонятное
+    # уточнение уходит дальше как есть, колонка не додумывает.
+    _ctx = _CTX.resolve(cmd)
+    if _ctx:
+        cmd = _ctx
+        low = cmd.lower().replace("ё", "е")
+
     if any(w in low for w in ("отмени будильник", "отменить будильник",
                               "отмени звонок", "отмени будильники")):
         reply, action = _alarm_cancel(low)
@@ -1829,6 +1856,11 @@ def _answer_text(cmd):
     if got:
         res = _alarm_set(cmd)
         if res:
+            # Запоминаем здесь, а не по слову «будильник» в команде: тема
+            # должна появиться после того, как будильник действительно стоит.
+            _CTX.remember(_CTX_TOPIC_ALARM, label=got[1].split(" в ")[0],
+                          hour=int(got[1][:2]),
+                          repeat_text=_describe_repeat(got[2]))
             return res[0], "alarm", res[1]
 
     player = _player_command(cmd)
@@ -1837,6 +1869,9 @@ def _answer_text(cmd):
         return reply, "player", action
     plugin_answer = _try_plugins(cmd)
     if plugin_answer is not None:
+        # Тему запоминаем по факту сработавшего плагина: иначе погода или
+        # таймер оставили бы след в контексте, даже если их не было.
+        _CTX.remember(_topic_of(cmd) or "")
         return plugin_answer, "plugin", None
     return call_ollama(cmd), "llm", None
 
