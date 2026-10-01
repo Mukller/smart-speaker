@@ -981,6 +981,18 @@ except ImportError:  # путь колонки не всегда в sys.path
                             VAD_FRAME as DEV_VAD_FRAME,
                             VAD_HANGOVER as DEV_VAD_HANGOVER,
                             VAD_MAX_FRAMES as DEV_VAD_MAX_FRAMES)
+
+# Состояние ожидания будильникового слова вынесено так же, как и аудио:
+# плата спит и не шлёт поток, пока сама не поймала слово.
+try:
+    from jane_wake import WakeState as _WakeState
+except ImportError:  # путь колонки не всегда в sys.path
+    # sys импортируется выше только в ветке jane_audio. Если тот импорт
+    # прошёл, sys здесь ещё не существует, и обращение к нему падало бы с
+    # NameError - колонка не поднялась бы, и виноват был бы jane_wake.
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from jane_wake import WakeState as _WakeState
 DEV_WAKE_DEFAULT = "дженет"
 
 _dev_clients = {}
@@ -1006,10 +1018,19 @@ def _wake_ok(text, wake):
 async def wsDevices():
     """Кто подключён. Плата полезна тем же, что и страница: видно, что
     канал жив, даже если вкладки нет."""
-    return {"devices": [{"id": k, "rate": v.get("rate"),
-                         "wake": v.get("wake"), "since": v.get("since")}
-                        for k, v in _dev_clients.items()],
-            "count": len(_dev_clients)}
+    # Состояние платы и число отброшенных пакетов видны здесь намеренно:
+    # без них «колонка спит» и «колонка молча сыпет трафик во сне» выглядят
+    # снаружи одинаково.
+    out = []
+    for k, v in _dev_clients.items():
+        st = v.get("st")
+        s = st.status() if st else {}
+        out.append({"id": k, "rate": v.get("rate"), "since": v.get("since"),
+                    "wake": s.get("state", "stream"),
+                    "local_wake": s.get("local_wake"),
+                    "dropped": s.get("dropped", 0),
+                    "answered": s.get("answered", 0)})
+    return {"devices": out, "count": len(_dev_clients)}
 
 
 @app.websocket("/ws/device")
@@ -1020,10 +1041,13 @@ async def ws_device(ws: WebSocket):
     rate = STT_RATE
     wake = DEV_WAKE_DEFAULT
     gate = None
+    # Плата с будильниковым словом на борту сама слышит комнату и шлёт
+    # поток только после слова. Состояние - в jane_wake, там же проверка.
+    st = None
     try:
         await ws.send_text(json.dumps({
             "type": "ready", "stt": _stt["loaded"], "tts": _tts["loaded"],
-            "id": dev_id, "want_rate": STT_RATE}))
+            "id": dev_id, "want_rate": STT_RATE, "frame": DEV_VAD_FRAME * 2}))
         stt_ok = _stt_ready()
         print("device ws %d: ready отправлен, stt_ready=%s loaded=%s err=%s"
               % (dev_id, stt_ok, _stt["loaded"], _stt["err"]), flush=True)
@@ -1046,6 +1070,12 @@ async def ws_device(ws: WebSocket):
                 if gate is None:
                     await ws.send_text(json.dumps(
                         {"type": "error", "message": "сначала пришли hello"}))
+                    continue
+                # Плата спит - звук не распознаём, а считаем. Раньше поток
+                # обрабатывался всегда, и колонка слушала комнату круглые
+                # сутки даже не собираясь что-то слышать.
+                if st is not None and not st.wants_audio():
+                    st.drop_audio(len(data))
                     continue
                 pcm = _pcm_resample(data, rate, STT_RATE)
                 if not gate.push(pcm):
@@ -1072,6 +1102,12 @@ async def ws_device(ws: WebSocket):
                 except Exception as e:
                     await ws.send_text(json.dumps(
                         {"type": "error", "message": "нет голоса: %s" % e}))
+                # Усыпляем плату сами: доске не нужно знать, когда выключать
+                # микрофон, иначе следующую команду она услышит без слова.
+                if st is not None:
+                    nap = st.after_answer()
+                    if nap:
+                        await ws.send_text(json.dumps(nap))
                 continue
 
             if kind == "websocket.receive" and msg.get("text"):
@@ -1090,17 +1126,31 @@ async def ws_device(ws: WebSocket):
                         rate = STT_RATE
                     wake = hello.get("wake", DEV_WAKE_DEFAULT)
                     gate = _SpeechGate()
+                    # local_wake: плата сама ловит будильниковое слово.
+                    # По умолчанию true - это целевая железка, и молчаливый
+                    # поток по сети больше не нужен.
+                    st = _WakeState(dev_id,
+                                    hello.get("local_wake", True),
+                                    hello.get("listen_window"))
                     _dev_clients[dev_id] = {"ws": ws, "rate": rate,
-                                            "wake": wake,
+                                            "wake": wake, "st": st,
                                             "since": int(time.time())}
-                    await ws.send_text(json.dumps({
-                        "type": "hello-ok", "id": dev_id, "want_rate": STT_RATE,
-                        "frame": DEV_VAD_FRAME * 2}))
+                    await ws.send_text(json.dumps(st.hello_reply()))
                 elif t == "bye":
                     break
-                else:
-                    await ws.send_text(json.dumps(
-                        {"type": "error", "message": "неизвестный тип: %s" % t}))
+                elif st is not None:
+                    reply = st.on_control(hello)
+                    if reply and reply.get("type") == "listening" \
+                            and st.local_wake:
+                        # Плата с локальным словом поймала его сама и уже
+                        # прислала wake. Требовать слово ещё раз в тексте
+                        # бессмысленно: его там нет, и команда уходила в
+                        # никуда, плата не получала ответа и не засыпала.
+                        wake = ""
+                    if not reply:
+                        reply = {"type": "error",
+                                 "message": "неизвестный тип: %s" % t}
+                    await ws.send_text(json.dumps(reply))
     except Exception as e:
         # Раньше тут стоял пустой pass, и канал молча закрывался сразу после
         # ready: ошибка была не видна нигде, и выглядело это как поломка

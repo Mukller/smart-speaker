@@ -59,9 +59,14 @@ async def main():
             return
         ok("сервер готов: stt=%s tts=%s" % (hello.get("stt"), hello.get("tts")))
 
-        await ws.send(json.dumps({"type": "hello", "rate": rate, "wake": ""}))
+        # local_wake false - плата без локального слова: она честно шлёт
+        # непрерывный поток, и сервер открывает ей окна. По умолчанию здесь
+        # local_wake true, и такой тест просто уснул бы, а его речь была бы
+        # отброшена: проверка падала бы с враньём, что канал не работает.
+        await ws.send(json.dumps({"type": "hello", "rate": rate, "wake": "",
+                                  "local_wake": False}))
         h2 = json.loads(await asyncio.wait_for(ws.recv(), 20))
-        if h2.get("type") != "hello-ok":
+        if h2.get("type") not in ("hello-ok", "listen"):
             bad("hello не принят: %r" % h2)
             return
         ok("hello принят, сервер пересчитает в %s Гц" % h2.get("want_rate"))
