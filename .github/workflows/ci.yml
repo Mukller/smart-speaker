@@ -34,21 +34,12 @@ jobs:
 
       - name: no secret in tracked files
         run: |
-          # Токен бота лежит на сервере в .telegram и в гит не попадает.
-          # Появление похожей строки в коде означало бы утечку при любом
-          # зеркалировании репозитория.
+          # Колонка ни с кем не общается, поэтому любой ключ в её исходниках
+          # означал бы утечку при зеркалировании репозитория.
           if git grep -nE '[0-9]{8,10}:[A-Za-z0-9_-]{30,}' -- . \
              | grep -v 'check_routes.py' \
              | grep -v 'deploy/deploy.sh'; then
-            echo "::error::найдена строка, похожая на токен Telegram"
+            echo "::error::найдена строка, похожая на токен бота"
             exit 1
           fi
-          echo "токенов в коде нет"
-
-      - name: .telegram is not tracked
-        run: |
-          if git ls-files --error-unmatch .telegram >/dev/null 2>&1; then
-            echo "::error::.telegram попал в репозиторий"
-            exit 1
-          fi
-          echo "секрет не отслеживается"
+          echo "ключей в коде нет"

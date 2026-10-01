@@ -932,88 +932,6 @@ def _parse_duration(text):
     return total if found and total > 0 else None
 
 
-_TG_CONF = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        "..", "..", ".telegram")
-_tg_lock = threading.Lock()
-_tg_state = {"sent": 0, "last": 0, "last_error": ""}
-
-
-def _tg_config():
-    """Токен и чат: сначала окружение, потом файл .telegram рядом с репозиторием.
-
-    Секрет намеренно не в коде и не в гите - колонка лежит на чужом сервере,
-    и токен в репозитории означал бы утечку при любом зеркалировании.
-    """
-    token = os.environ.get("JANE_TG_TOKEN", "").strip()
-    chat = os.environ.get("JANE_TG_CHAT", "").strip()
-    try:
-        with open(_TG_CONF, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                k, v = k.strip().upper(), v.strip()
-                if k == "TOKEN" and not token:
-                    token = v
-                elif k == "CHAT" and not chat:
-                    chat = v
-    except Exception:
-        pass
-    return token, chat
-
-
-def _tg_call(method, payload=None, files=None):
-    token, chat = _tg_config()
-    if not token or not chat:
-        return None
-    import requests
-    url = "https://api.telegram.org/bot%s/%s" % (token, method)
-    data = dict(payload or {})
-    data["chat_id"] = chat
-    try:
-        r = requests.post(url, data=data, files=files, timeout=25)
-    except Exception as e:
-        _tg_state["last_error"] = "%s: %s" % (type(e).__name__, e)
-        return None
-    if r.status_code != 200:
-        _tg_state["last_error"] = "http %d" % r.status_code
-        return None
-    _tg_state["last_error"] = ""
-    return r.json()
-
-
-def _notify_fired(total):
-    """Отправляет звонок в Telegram, чтобы будильник был слышен без вкладки.
-
-    Отдельным потоком: send() идёт синхронно, а звонить он не должен -
-    иначе запрос к /timers зависнет на время сети Telegram.
-    """
-    token, chat = _tg_config()
-    if not token or not chat:
-        return
-    with _tg_lock:
-        when = time.strftime("%H:%M")
-        head = "Будильник. Сейчас %s" % when
-        body = head
-        if total:
-            body = "%s\nСтавил на %s" % (head, "%d мин" % max(1, round(total / 60.0)))
-        _tg_call("sendMessage", {"text": body})
-        # Голосовое отправляем именно как аудио: sendVoice требует OGG/Opus,
-        # а тут WAV, который Telegram принимает в sendAudio без перекодировки.
-        try:
-            wav = _tts_wav_bytes("Будильник! %s" % when)
-        except Exception as e:
-            _tg_state["last_error"] = "tts: %s" % e
-            wav = None
-        if wav:
-            _tg_call("sendAudio",
-                     {"caption": "Голосовое сообщение будильника", "title": "Будильник"},
-                     files={"audio": ("alarm.wav", wav, "audio/wav")})
-        _tg_state["sent"] += 1
-        _tg_state["last"] = int(time.time())
-
-
 def _check_fired():
     """Ловит момент срабатывания таймера.
 
@@ -1033,14 +951,6 @@ def _check_fired():
         if was and (not end or end <= 0):
             _fired_count[0] += 1
             _fired_last[0] = int(time.time())
-            # Счётчик растёт ровно один раз на звонок (_timer_seen очищается
-            # ниже), поэтому уведомление тоже будет ровно одно.
-            try:
-                threading.Thread(target=_notify_fired,
-                                 args=(int(_timer_total.get(i, 0)),),
-                                 daemon=True).start()
-            except Exception:
-                pass
     _timer_seen.clear()
     _timer_total.clear()
     for i, end in enumerate(slots):
@@ -1089,20 +999,6 @@ async def timers(seen: int = 0):
 
     return {"active": active, "missed": missed, "fired": missed,
             "fired_count": _fired_count[0], "now": int(now)}
-
-
-@app.get("/alarmTelegram")
-async def alarmTelegram(test: str = ""):
-    """Состояние канала будильника в Telegram; test=<текст> шлёт проверку."""
-    token, chat = _tg_config()
-    out = {"configured": bool(token and chat), "sent": _tg_state["sent"],
-           "last": _tg_state["last"], "last_error": _tg_state["last_error"]}
-    if test:
-        t0 = time.time()
-        threading.Thread(target=_notify_fired, args=(0,), daemon=True).start()
-        time.sleep(0.4)
-        out["test_sent"] = True
-    return out
 
 
 @app.get("/timerwav")

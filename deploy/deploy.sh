@@ -290,19 +290,8 @@ if [ -d "$VENDOR/plugins" ]; then
     fi
 fi
 
-# Секрет канала будильника лежит только на сервере и в гит не попадает.
-# Копируем отдельно и только если файл есть: колонка обязана работать и без
-# Telegram, просто тогда будильник слышен исключительно в браузере.
-TG_SRC="$REPO_DIR/.telegram"
-if [ -f "$TG_SRC" ]; then
-    docker cp "$TG_SRC" "$CONTAINER:/app/.telegram" \
-        && ok "канал будильника в Telegram настроен" \
-        || bad "канал будильника не скопирован - звонок будет только в браузере"
-else
-    warn "нет .telegram - будильник будет звонить только в браузере"
-fi
-
-# проверяем, что секрет не утёк в код
+# Проверяем, что в код не просочился токен: колонка не ходит в мессенджеры,
+# и ключ от чужого бота в её исходниках означал бы утечку при зеркалировании.
 if grep -rqE '[0-9]{8,10}:[A-Za-z0-9_-]{30,}' "$VENDOR/runva_webapi.py" 2>/dev/null; then
     bad "в runva_webapi.py похож на токен - секрет не должен быть в коде"
 else
@@ -380,44 +369,37 @@ pc=$(curl -s --max-time 20 "$API/plugins" | tr ',' '\n' | grep -c '"name"' || tr
 [ "${pc:-0}" -ge 8 ] && ok "плагинов в списке: $pc" \
     || { bad "плагинов в списке всего $pc - часть выпала"; fails=1; }
 
-# Канал будильника проверяем запросом к API, а не наличием файла: скопированный
-# файл ещё не значит, что его читает приложение и что токен рабочий. Раньше
-# проверка жила только в коде, и деплой мог убрать звонок в Telegram молча.
+# Состояние звука спрашиваем у API, а не решаем на глаз: на какой машине
+# колонка играет сама, а где звук отдаёт браузеру.
 ah=$(curl -s --max-time 25 "$API/audioHealth" 2>/dev/null || echo "{}")
-tg_ok=$(printf '%s' "$ah" | python3 -c "
+ah_ok=$(printf '%s' "$ah" | python3 -c "
 import json,sys
 try:
     print('yes' if json.load(sys.stdin) else 'no')
 except Exception:
     print('no')
 " 2>/dev/null)
-if [ "$tg_ok" = "yes" ]; then
-    ok "состояние звука и канала известно (audioHealth отвечает)"
+if [ "$ah_ok" = "yes" ]; then
+    ok "состояние звука известно (audioHealth отвечает)"
 else
     bad "audioHealth не отвечает - нельзя понять, на чём играет колонка"
     fails=1
 fi
 
-# Будильник должен уметь позвонить в Telegram: проверяем конфигурацию,
-# не отправляя сообщение человеку во время деплоя.
-if timeout 90 docker exec "$CONTAINER" python3 - <<'PY' >/dev/null 2>&1
-import os, sys
-p = "/app/.telegram"
-if not os.path.isfile(p):
-    sys.exit(1)
-keys = set()
-for line in open(p, encoding="utf-8"):
-    line = line.strip()
-    if "=" in line and not line.startswith("#"):
-        keys.add(line.split("=", 1)[0].strip().upper())
-sys.exit(0 if {"TOKEN", "CHAT"} <= keys else 1)
-PY
-then
-    ok "канал будильника в контейнере настроен (токен и чат на месте)"
+# Будильник должен уметь позвонить самому себе: колонка играет звук, когда
+# сработал таймер, и не должна тихо потерять этот механизм.
+# Файл, а не конвейер: при set -o pipefail curl ловит SIGPIPE от head, и весь
+# пайплайн возвращает ошибку, хотя grep сработал. На проверке самого звука это
+# выглядело как «будильник сломан», хотя /timerwav отвечал 200 и RIFF.
+tw=$(mktemp)
+if curl -s --max-time 30 -o "$tw" "$API/timerwav" \
+   && [ "$(head -c 4 "$tw")" = "RIFF" ]; then
+    ok "звонок будильника на месте (WAV $(wc -c < "$tw") байт)"
 else
-    bad "канал будильника не настроен - звонок будет только в браузере"
+    bad "будильник не сможет звонить: /timerwav не отдаёт звук"
     fails=1
 fi
+rm -f "$tw"
 
 code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
        --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/kolonka/" || echo 000)
