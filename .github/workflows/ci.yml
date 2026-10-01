@@ -32,6 +32,16 @@ jobs:
       - name: routes agree between interface and tests
         run: python tests/check_routes.py
 
+      # Детектор речи - чистая логика, ему не нужны ни модель, ни сеть.
+      # Настройка порога тишины ломает фразы незаметно: заметить можно было
+      # только живым разговором. Полный requirements.txt с torch и gradio
+      # тут не нужен, поэтому ставятся только то, что реально требуется.
+      - name: speech gate logic
+        run: |
+          pip install -q "click>=8.1" fastapi uvicorn starlette requests \
+                           termcolor numpy python-dateutil
+          python tests/test_speech_gate_offline.py
+
       - name: no secret in tracked files
         run: |
           # Колонка ни с кем не общается, поэтому любой ключ в её исходниках
