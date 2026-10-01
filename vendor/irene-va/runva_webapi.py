@@ -966,16 +966,23 @@ async def ws_device(ws: WebSocket):
         await ws.send_text(json.dumps({
             "type": "ready", "stt": _stt["loaded"], "tts": _tts["loaded"],
             "id": dev_id, "want_rate": STT_RATE}))
-        if not _stt_ready():
+        stt_ok = _stt_ready()
+        print("device ws %d: ready отправлен, stt_ready=%s loaded=%s err=%s"
+              % (dev_id, stt_ok, _stt["loaded"], _stt["err"]), flush=True)
+        if not stt_ok:
             await ws.send_text(json.dumps(
                 {"type": "error", "message": "распознавание не загружено"}))
+            print("device ws %d: выход - stt не готов" % dev_id, flush=True)
             return
 
         while True:
             msg = await ws.receive()
             kind = msg.get("type")
             if kind == "websocket.disconnect":
+                print("device ws %d: клиент отключился" % dev_id, flush=True)
                 break
+            if kind == "websocket.connect":
+                continue
             data = msg.get("bytes")
             if kind == "websocket.receive" and data:
                 if gate is None:

@@ -107,6 +107,33 @@ def live(rel):
         return 0, "%s: %s" % (type(e).__name__, e)
 
 
+def nginx_ws():
+    """Шаблон nginx обязан пропускать WebSocket канала устройства.
+
+    Здесь это уже стоило работы: заголовков Upgrade в блоке /kolonka/api/
+    не было, канал не поднимался снаружи, а все HTTP-эндпоинты рядом
+    отвечали 200 - то есть поломка выглядела как «всё работает, кроме
+    канала», и без этой проверки её не заметил бы никто.
+    """
+    path = os.path.join(os.path.dirname(REPO), "antonpetnitsky.com", "deploy.sh")
+    if not os.path.isfile(path):
+        print("info   шаблон nginx не найден рядом, проверка пропущена")
+        return 0
+    src = open(path, encoding="utf-8").read()
+    bad = 0
+    for needle, why in (
+            ("map $http_upgrade", "нет map для значения Connection"),
+            ("proxy_http_version 1.1", "на HTTP/1.0 апгрейд не проходит"),
+            ("proxy_set_header Upgrade", "Upgrade не передаётся апстриму"),
+            ("proxy_set_header Connection", "Connection не передаётся апстриму")):
+        if needle not in src:
+            print("FAIL  nginx: %s (%s)" % (why, needle))
+            bad += 1
+    if not bad:
+        ok("nginx пропускает WebSocket для канала устройства")
+    return bad
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--live", action="store_true",
@@ -115,6 +142,7 @@ def main():
 
     errors = 0
     api, rels = ui_paths()
+    errors += nginx_ws()
 
     direct = exact_paths()
     if direct:
