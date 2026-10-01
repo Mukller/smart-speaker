@@ -1036,8 +1036,11 @@ async def ws_device(ws: WebSocket):
                 else:
                     await ws.send_text(json.dumps(
                         {"type": "error", "message": "неизвестный тип: %s" % t}))
-    except Exception:
-        pass
+    except Exception as e:
+        # Раньше тут стоял пустой pass, и канал молча закрывался сразу после
+        # ready: ошибка была не видна нигде, и выглядело это как поломка
+        # nginx, хотя рукопожатие проходило.
+        print("device ws error: %s: %s" % (type(e).__name__, e), flush=True)
     finally:
         _dev_clients.pop(dev_id, None)
 
