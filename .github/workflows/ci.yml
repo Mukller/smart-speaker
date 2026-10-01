@@ -43,6 +43,11 @@ jobs:
           python -m pip install --quiet numpy
           python vendor/irene-va/jane_audio.py
 
+      # Разбор фраз будильника: тоже чистая логика без сети и без модели.
+      # «Поставь будильник на семь утра» - базовая вещь, которой не было.
+      - name: alarm phrase parsing
+        run: python vendor/irene-va/jane_time.py
+
       # Детектор речи - чистая логика, ему не нужны ни модель, ни сеть.
       # Настройка порога тишины ломает фразы незаметно: заметить можно было
       # только живым разговором. Полный requirements.txt с torch и gradio

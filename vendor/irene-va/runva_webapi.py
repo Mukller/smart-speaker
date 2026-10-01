@@ -619,6 +619,149 @@ def _rate_limit(bucket, limit):
     return n <= limit
 
 
+
+# ---------------------------------------------------------------------------
+# Будильники на время суток.
+#
+# Таймер из плагина умеет только относительное «на N минут», а это даже не у
+# каждой колонки: будильник на семь утра - базовая вещь. Разбор фраз живёт в
+# jane_time, чтобы его можно было проверять без контейнера.
+#
+# Своё хранилище, а не core.timers: там слоты живут минуты и ядро гасит их
+# самим. Будильник на утро должен пережить перезапуск, поэтому он лежит в томе
+# опций рядом с таймерами.
+# ---------------------------------------------------------------------------
+ALARM_STATE = os.path.join(OPTIONS_DIR, "webapi_alarms.json")
+_alarms = []
+_alarm_seq = [0]
+
+try:
+    from jane_time import parse_alarm_phrase as _parse_alarm_phrase
+except ImportError:
+    import sys as _sys
+    _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from jane_time import parse_alarm_phrase as _parse_alarm_phrase
+
+
+def _alarms_save():
+    try:
+        blob = json.dumps({"alarms": _alarms}, ensure_ascii=False)
+        tmp = ALARM_STATE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(blob)
+        os.replace(tmp, ALARM_STATE)
+    except Exception as e:
+        print("alarms save failed: %s: %s" % (type(e).__name__, e), flush=True)
+
+
+def _alarms_load():
+    global _alarms
+    try:
+        with open(ALARM_STATE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        _alarms = data.get("alarms") or []
+        for a in _alarms:
+            try:
+                _alarm_seq[0] = max(_alarm_seq[0], int(a.get("id", 0)))
+            except Exception:
+                pass
+    except Exception:
+        _alarms = []
+
+
+def _alarms_public():
+    now = time.time()
+    out = []
+    for a in _alarms:
+        try:
+            left = int(float(a.get("at", 0)) - now)
+        except Exception:
+            continue
+        out.append({"id": a.get("id"), "at": int(float(a.get("at", 0))),
+                    "label": a.get("label"), "repeat": a.get("repeat"),
+                    "left": left})
+    return sorted(out, key=lambda x: x["at"])
+
+
+def _alarm_set(phrase):
+    got = _parse_alarm_phrase(phrase)
+    if not got:
+        return None
+    at, label, repeat = got
+    _alarm_seq[0] += 1
+    _alarms.append({"id": _alarm_seq[0], "at": at, "label": label,
+                    "repeat": repeat, "fired": 0})
+    _alarms_save()
+    rep = {"daily": " каждый день", "weekdays": " по будням",
+           "weekend": " по выходным", "weekly": " еженедельно"}.get(repeat, "")
+    return ("Будильник на %s%s." % (label, rep),
+            "Будильник на %s%s" % (label, rep))
+
+
+def _alarm_cancel(phrase):
+    # Все ветки возвращают кортеж (текст, действие). Одна ветка отдавала
+    # голую строку, и распаковка падала: «отмени будильник» давал 500.
+    p = (phrase or "").lower().replace("ё", "е")
+    if not _alarms:
+        return "Будильник не задан.", None
+    # «отмени будильник» без времени - весь будильник сразу
+    if not any(ch.isdigit() for ch in p):
+        n = len(_alarms)
+        del _alarms[:]
+        _alarms_save()
+        return ("Отменила все будильники, их было %d." % n, None)
+    for i in range(len(_alarms) - 1, -1, -1):
+        lab = str(_alarms[i].get("label") or "")
+        for part in lab.split(":"):
+            if part and part in p:
+                a = _alarms.pop(i)
+                _alarms_save()
+                return ("Будильник на %s отменён." % lab, None)
+    return "Не нашла будильник на это время.", None
+
+
+def _alarms_check():
+    """Проверяет будильники и поднимает счётчик звонков.
+
+    Повторяющийся будильник не тратится, а переносится на следующий день: он
+    для того и повторяющийся. Просроченный разовый - тоже: иначе после
+    возвращения через сутки колонка звонила бы немедленно, и не один раз.
+    """
+    global _alarms
+    now = time.time()
+    fired = []
+    keep = []
+    for a in _alarms:
+        at = float(a.get("at", 0) or 0)
+        if at > now:
+            keep.append(a)
+            continue
+        fired.append(a)
+        if a.get("repeat"):
+            nxt = at + 86400
+            while nxt <= now:
+                nxt += 86400
+            a["at"] = nxt
+            a["fired"] = int(a.get("fired", 0)) + 1
+            keep.append(a)
+    if fired:
+        _alarms = keep
+        _alarms_save()
+        _fired_count[0] += len(fired)
+        _fired_last[0] = int(now)
+        for a in fired:
+            print("alarm fired: id=%s label=%s repeat=%s"
+                  % (a.get("id"), a.get("label"), a.get("repeat")), flush=True)
+    return len(fired)
+
+
+@app.get("/alarms")
+async def alarms():
+    _alarms_load()
+    return {"alarms": _alarms_public(), "count": len(_alarms)}
+
+
+
 @app.get("/audioHealth")
 def audioHealth():
     """Что колонка может проигрывать и что нужно, чтобы проигрывала.
@@ -1615,12 +1758,29 @@ def _human_duration(secs):
 
 
 def _answer_text(cmd):
-    """Единый путь ответа на команду: плеер, потом плагины, потом модель.
+    """Единый путь ответа: будильник, плеер, плагины, модель.
 
-    Вынесено, чтобы канал устройства и браузер отвечали одинаково. Пока
-    каждый держал свою копию, правки расходились: в одном месте появлялась
-    команда, в другом нет.
+    Будильник проверяется первым: «поставь будильник на семь утра» не должно
+    уходить в модель, которая ответит что-то вроде «не могу запомнить», и тем
+    более в плагин таймера, который ждёт только относительное «на N минут».
+
+    Возвращается кортеж (текст, источник, действие).
+
+    Единый путь нужен, чтобы канал устройства и браузер отвечали одинаково:
+    пока каждый держал свою копию, правки расходились - в одном месте команда
+    появлялась, в другом нет.
     """
+    low = (cmd or "").lower().replace("ё", "е")
+    if any(w in low for w in ("отмени будильник", "отменить будильник",
+                              "отмени звонок", "отмени будильники")):
+        reply, action = _alarm_cancel(low)
+        return reply, "alarm", action
+    got = _parse_alarm_phrase(cmd)
+    if got:
+        res = _alarm_set(cmd)
+        if res:
+            return res[0], "alarm", res[1]
+
     player = _player_command(cmd)
     if player is not None:
         reply, action = player
@@ -1725,6 +1885,7 @@ async def app_timers():
         # начнёт гасить слоты, иначе он сгорит как просроченный
         _restore_timers()
         _persist_timers()
+        _alarms_check()
         # Звонок будильника уходит подключённой плате. Раньше звучал только
         # браузер, и колонка без вкладки была беззвучной: будильник, ради
         # которого всё затевалось, молчал именно там, где колонка нужна.
