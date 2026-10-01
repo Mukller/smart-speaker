@@ -32,6 +32,17 @@ jobs:
       - name: routes agree between interface and tests
         run: python tests/check_routes.py
 
+      # Аудио канала устройства: только numpy, без сети и без модели, поэтому
+      # идёт в сборку. Раньше детектор конца фразы жил внутри runva_webapi,
+      # который при импорте тянет vosk и fastapi и в обычной среде падает на
+      # конфликте версий click - то есть проверять его было нечем, кроме
+      # контейнера, то есть вручную. Одна неудачная настройка порога тишины
+      # снова порубила бы фразы, и заметить это можно было бы только живьём.
+      - name: audio logic for the device channel
+        run: |
+          python -m pip install --quiet numpy
+          python vendor/irene-va/jane_audio.py
+
       # Детектор речи - чистая логика, ему не нужны ни модель, ни сеть.
       # Настройка порога тишины ломает фразы незаметно: заметить можно было
       # только живым разговором. Полный requirements.txt с torch и gradio
