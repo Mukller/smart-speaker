@@ -59,6 +59,11 @@ jobs:
       - name: conversation context
         run: python vendor/irene-va/jane_context.py
 
+      # Умный дом: свет, приборы, падежи и честный отказ, когда устройство
+      # не подключено. Без сети и без железа.
+      - name: smart home
+        run: python vendor/irene-va/jane_home.py
+
       # Детектор речи - чистая логика, ему не нужны ни модель, ни сеть.
       # Настройка порога тишины ломает фразы незаметно: заметить можно было
       # только живым разговором. Полный requirements.txt с torch и gradio

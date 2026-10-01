@@ -246,12 +246,24 @@ say "2/5 файлы внутри контейнера"
 for rel in webapi_client/index.html webapi_client/manifest.json \
            webapi_client/icon.svg \
            plugins/plugin_greetings.py \
-           voice_profiles.json runva_webapi.py jane_audio.py jane_time.py jane_wake.py jane_context.py; do
+           voice_profiles.json runva_webapi.py jane_audio.py jane_time.py jane_wake.py jane_context.py jane_home.py; do
     [ -f "$VENDOR/$rel" ] || { warn "нет файла $rel — пропускаю"; continue; }
     docker cp "$VENDOR/$rel" "$CONTAINER:/app/vendor/irene-va/$rel" \
         || die "docker cp не удался: $rel"
     ok "$rel"
 done
+
+# Конфиг устройств умного дома лежит в volume options и в гит не попадает
+# сам по себе: без этой строки файл просто не доедет до контейнера, и дом
+# будет пустым, а колонка - «не знаю такого устройства».
+if [ -f "$VENDOR/options/home_devices.json" ]; then
+    docker cp "$VENDOR/options/home_devices.json" \
+        "$CONTAINER:/app/vendor/irene-va/options/home_devices.json" \
+        || die "docker cp не удался: options/home_devices.json"
+    ok "options/home_devices.json"
+else
+    warn "нет options/home_devices.json — умный дом будет пустым"
+fi
 
 # Плагины. Раньше в гит попадал только plugin_greetings.py, а остальные
 # жили исключительно в контейнере: их нельзя было ни прочитать, ни починить,

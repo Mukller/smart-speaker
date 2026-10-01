@@ -997,21 +997,80 @@ except ImportError:  # путь колонки не всегда в sys.path
 # Контекст разговора: «буди в семь», потом «а в выходные?». Тоже чистая
 # логика без сокета и без модели - иначе проверить её можно было бы только
 # вручную на живой колонке.
+# Умный дом: устройства в настройках, сеть и реле - снаружи.
+# Локальный драйвер держит состояние в памяти и работает без сети, поэтому
+# колонка не встаёт, когда Home Assistant недоступен.
 try:
     from jane_context import Context as _CTXClass
     from jane_context import TOPIC_ALARM as _CTX_TOPIC_ALARM
     from jane_context import topic_of as _topic_of
+    from jane_context import TOPIC_HOME as _CTX_TOPIC_HOME
     from jane_time import describe_repeat as _describe_repeat
+    from jane_home import Home as _Home, LocalDriver as _LocalDriver
 except ImportError:
     import sys as _sys
     _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from jane_context import Context as _CTXClass
     from jane_context import TOPIC_ALARM as _CTX_TOPIC_ALARM
     from jane_context import topic_of as _topic_of
+    from jane_context import TOPIC_HOME as _CTX_TOPIC_HOME
     from jane_time import describe_repeat as _describe_repeat
+    from jane_home import Home as _Home, LocalDriver as _LocalDriver
 
 # Контекст один на колонку: он и должен быть общим для браузера и платы.
 _CTX = _CTXClass()
+
+
+def _load_home():
+    """Устройства умного дома из настроек. Пустой дом - не ошибка.
+
+    Если файла нет или он сломан, колонка просто не понимает про свет.
+    Подниматься из-за этого нельзя: умный дом - дополнение, а не условие
+    работы колонки.
+    """
+    path = os.path.join(OPTIONS_DIR, "home_devices.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        devs = data.get("devices") or []
+    except Exception as e:
+        print("home: устройства не прочитаны (%s: %s), дом пуст"
+              % (type(e).__name__, e), flush=True)
+        return _Home([], _LocalDriver())
+    if not isinstance(devs, list):
+        print("home: devices не список, дом пуст", flush=True)
+        return _Home([], _LocalDriver())
+    return _Home(devs, _LocalDriver())
+
+
+_HOME = None
+
+
+def _home():
+    global _HOME
+    if _HOME is None:
+        _HOME = _load_home()
+    return _HOME
+
+
+def _home_answer(cmd):
+    """Ответ на разговор про устройства. None - это не про дом."""
+    h = _home()
+    if not h.devices:
+        return None
+    intent = h.parse(cmd)
+    if intent is None:
+        return None
+    try:
+        return h.answer(intent)
+    except Exception as e:
+        # Дом не должен ронять колонку: ошибка железа - не повод
+        # отвечать 500 на «включи свет».
+        print("home: ошибка исполнения %r (%s: %s)"
+              % (intent, type(e).__name__, e), flush=True)
+        return ("Не получилось управлять устройством.", None)
+
+
 DEV_WAKE_DEFAULT = "дженет"
 
 _dev_clients = {}
@@ -1050,6 +1109,42 @@ async def wsDevices():
                     "dropped": s.get("dropped", 0),
                     "answered": s.get("answered", 0)})
     return {"devices": out, "count": len(_dev_clients)}
+
+
+def _home_device_view(d):
+    """Состояние устройства для интерфейса и для проверок."""
+    h = _home()
+    out = {"id": d.get("id"), "name": d.get("name"), "kind": d.get("kind"),
+           "zone": d.get("zone"), "unit": d.get("unit")}
+    if not h.connected(d):
+        # Неподключённое устройство не должно показываться включённым.
+        out["state"] = None
+        out["connected"] = False
+        return out
+    out["connected"] = True
+    if d.get("kind") == "sensor":
+        out["value"] = h.driver.read(d.get("id"))
+    else:
+        out["state"] = h.state_of(d)
+        if d.get("kind") == "light":
+            out["brightness"] = h.driver.brightness(d.get("id"))
+    return out
+
+
+@app.get("/home")
+async def home_state():
+    """Что есть в доме и в каком состоянии."""
+    h = _home()
+    return {"devices": [_home_device_view(d) for d in h.devices],
+            "count": len(h.devices)}
+
+
+@app.get("/home/{device_id}")
+async def home_one(device_id: str):
+    for d in _home().devices:
+        if d.get("id") == device_id:
+            return _home_device_view(d)
+    raise HTTPException(404, "нет такого устройства")
 
 
 @app.websocket("/ws/device")
@@ -1863,6 +1958,14 @@ def _answer_text(cmd):
                           repeat_text=_describe_repeat(got[2]))
             return res[0], "alarm", res[1]
 
+    # Разговор про устройства раньше плеера: «включи свет» не должно уходить
+    # в музыку. Будильник остаётся первым - «включи будильник» это всё
+    # ещё будильник.
+    home = _home_answer(cmd)
+    if home is not None:
+        _CTX.remember(_CTX_TOPIC_HOME)
+        return home[0], "home", home[1]
+
     player = _player_command(cmd)
     if player is not None:
         reply, action = player
@@ -1893,6 +1996,15 @@ async def sendSimpleTxtCmdStream(cmd:str, model:str = "qwen2.5:0.5b-instruct"):
         raise HTTPException(429, "слишком много команд, подожди минуту")
 
     async def event_generator():
+        # Умный дом раньше плеера и модели: «включи свет» - это про дом,
+        # а не про музыку и не повод спросить языковую модель.
+        home = _home_answer(cmd)
+        if home is not None:
+            _CTX.remember(_CTX_TOPIC_HOME)
+            yield "data: " + json.dumps({"response": home[0], "source": "home",
+                                         "action": home[1]}) + "\n\n"
+            yield "data: [DONE]\n\n"
+            return
         # Плеер: действие возвращаем структурно, интерфейс его выполнит
         player = _player_command(cmd)
         if player is not None:
