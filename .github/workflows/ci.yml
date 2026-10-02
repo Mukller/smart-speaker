@@ -64,6 +64,11 @@ jobs:
       - name: smart home
         run: python vendor/irene-va/jane_home.py
 
+      # Дела при будильнике: «буди в 6:30 и включи свет». Разбор фразы
+      # без колонки.
+      - name: alarm recipes
+        run: python vendor/irene-va/jane_recipe.py
+
       # Детектор речи - чистая логика, ему не нужны ни модель, ни сеть.
       # Настройка порога тишины ломает фразы незаметно: заметить можно было
       # только живым разговором. Полный requirements.txt с torch и gradio

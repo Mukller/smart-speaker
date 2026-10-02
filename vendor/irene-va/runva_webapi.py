@@ -679,7 +679,13 @@ def _alarms_public():
             continue
         out.append({"id": a.get("id"), "at": int(float(a.get("at", 0))),
                     "label": a.get("label"), "repeat": a.get("repeat"),
-                    "left": left})
+                    "left": left,
+                    # Дела будильника видны наружу: без них интерфейс
+                    # показывает будильник, про который не известно, что
+                    # колонка собирается делать, и проверить их сохранение
+                    # нечем.
+                    "actions": a.get("actions") or [],
+                    "fired": int(a.get("fired", 0) or 0)})
     return sorted(out, key=lambda x: x["at"])
 
 
@@ -690,12 +696,59 @@ def _alarm_set(phrase):
     at, label, repeat = got
     _alarm_seq[0] += 1
     _alarms.append({"id": _alarm_seq[0], "at": at, "label": label,
-                    "repeat": repeat, "fired": 0})
+                    "repeat": repeat, "fired": 0, "actions": []})
     _alarms_save()
     rep = {"daily": " каждый день", "weekdays": " по будням",
            "weekend": " по выходным", "weekly": " еженедельно"}.get(repeat, "")
     return ("Будильник на %s%s." % (label, rep),
             "Будильник на %s%s" % (label, rep))
+
+
+def _alarm_set_recipe(phrase):
+    """Поставить будильник с делами: «буди в 6:30 и включи свет».
+
+    Время разбирается как обычно, дела - отдельно. Если времени нет, дела
+    не выполняются и будильник не ставится: колонка не должна обещать
+    подъём в шесть утра, если её об этом не просили.
+    """
+    tail, when = _split_recipe(phrase)
+    got = _parse_alarm_phrase(when)
+    if not got:
+        return None
+    acts = _parse_actions(tail)
+    if not acts:
+        return _alarm_set(when)
+    at, label, repeat = got
+    _alarm_seq[0] += 1
+    _alarms.append({"id": _alarm_seq[0], "at": at, "label": label,
+                    "repeat": repeat, "fired": 0,
+                    "actions": [a.as_dict() for a in acts]})
+    _alarms_save()
+    rep = {"daily": " каждый день", "weekdays": " по будням",
+           "weekend": " по выходным", "weekly": " еженедельно"}.get(repeat, "")
+    plain = _alarm_plain(label, repeat)
+    return ("Будильник на %s. Когда сработает: %s."
+            % (plain, _recipe_plain(acts)), plain)
+
+
+def _alarm_plain(label, repeat):
+    rep = {"daily": " каждый день", "weekdays": " по будням",
+           "weekend": " по выходным", "weekly": " еженедельно"}.get(repeat, "")
+    return "%s%s" % (label, rep)
+
+
+def _recipe_plain(acts):
+    bits = []
+    for a in acts:
+        if a.kind == "say":
+            bits.append("скажу «%s»" % a.text)
+        elif a.target == "музыка":
+            bits.append("включу музыку")
+        else:
+            bits.append("%s %s" % ("выключу" if getattr(a, "verb", "")
+                                   .startswith(("выкл", "погаси")) else
+                                   "включу", a.target))
+    return ", ".join(bits)
 
 
 def _alarm_cancel(phrase):
@@ -718,6 +771,37 @@ def _alarm_cancel(phrase):
                 _alarms_save()
                 return ("Будильник на %s отменён." % lab, None)
     return "Не нашла будильник на это время.", None
+
+
+def _recipe_run(alarm):
+    """Выполнить дела будильника. Возвращает, что получилось, для ответа.
+
+    Ошибка одного дела не должна отменять остальные и не должна ронять
+    колонку: будильник уже звонит, и молчание после звонка хуже, чем
+    сообщение о том, что чайник не включился.
+    """
+    done, failed = [], []
+    for d in (alarm.get("actions") or []):
+        a = _Action.from_dict(d)
+        try:
+            if a.kind == "say":
+                done.append(a.text)
+                continue
+            h = _home()
+            if a.target == "музыка":
+                done.append("музыка")
+                continue
+            intent = h.parse("включи %s" % a.target)
+            if intent is None:
+                failed.append(a.target)
+                continue
+            h.answer(intent)
+            done.append(a.target)
+        except Exception as e:
+            print("recipe: %s не выполнено (%s: %s)"
+                  % (a.target, type(e).__name__, e), flush=True)
+            failed.append(a.target)
+    return done, failed
 
 
 def _alarms_check():
@@ -752,12 +836,31 @@ def _alarms_check():
         for a in fired:
             print("alarm fired: id=%s label=%s repeat=%s"
                   % (a.get("id"), a.get("label"), a.get("repeat")), flush=True)
+            # Дела будильника: включить свет, сказать текст. Будильник без
+            # них просто звонит, а вставать всё равно в темноте.
+            if a.get("actions"):
+                done, failed = _recipe_run(a)
+                print("alarm actions: сделано=%s не вышло=%s"
+                      % (done, failed), flush=True)
+                # Что сказать вслух: сначала слова рецепта («доброе
+                # утро»), а если что-то не вышло - прямо это. Иначе
+                # колонка сделает вид, что всё в порядке.
+                said = [a.text for a in (_Action.from_dict(d)
+                                         for d in a["actions"])
+                        if a.kind == "say"]
+                note = "Будильник."
+                if said:
+                    note += " " + ". ".join(said)
+                if failed:
+                    note += " Не вышло: %s." % ", ".join(failed)
+                _fired_note[0] = note
     return len(fired)
 
 
 @app.get("/alarms")
 async def alarms():
     _alarms_load()
+    _alarms_dirty[0] = False
     return {"alarms": _alarms_public(), "count": len(_alarms)}
 
 
@@ -1007,6 +1110,9 @@ try:
     from jane_context import TOPIC_HOME as _CTX_TOPIC_HOME
     from jane_time import describe_repeat as _describe_repeat
     from jane_home import Home as _Home, LocalDriver as _LocalDriver
+    from jane_recipe import (Action as _Action,
+                             parse_actions as _parse_actions,
+                             split_recipe as _split_recipe)
 except ImportError:
     import sys as _sys
     _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -1016,6 +1122,9 @@ except ImportError:
     from jane_context import TOPIC_HOME as _CTX_TOPIC_HOME
     from jane_time import describe_repeat as _describe_repeat
     from jane_home import Home as _Home, LocalDriver as _LocalDriver
+    from jane_recipe import (Action as _Action,
+                             parse_actions as _parse_actions,
+                             split_recipe as _split_recipe)
 
 # Контекст один на колонку: он и должен быть общим для браузера и платы.
 _CTX = _CTXClass()
@@ -1297,6 +1406,14 @@ _timer_total = {}
 # пропущенный звонок не теряется при закрытой вкладке
 _fired_count = [0]
 _fired_last = [0]
+# Что сказать вместо обычного «Будильник!», если сработавшему будильнику
+# не удалось что-то сделать. Пусто - значит говорим обычное.
+_fired_note = [""]
+# Будильники лежат в файле, а в памяти появляются только при загрузке. Раньше
+# она происходила лишь по запросу /alarms, поэтому будильник, поставленный
+# до перезапуска, просто не существовал, пока кто-нибудь не открыл список.
+_alarms_dirty = [True]
+_tick = [0]
 
 
 def _list_music():
@@ -1949,7 +2066,7 @@ def _answer_text(cmd):
         return reply, "alarm", action
     got = _parse_alarm_phrase(cmd)
     if got:
-        res = _alarm_set(cmd)
+        res = _alarm_set_recipe(cmd) or _alarm_set(cmd)
         if res:
             # Запоминаем здесь, а не по слову «будильник» в команде: тема
             # должна появиться после того, как будильник действительно стоит.
@@ -2072,6 +2189,31 @@ def app_shutdown():
 @app.on_event("startup")
 @repeat_every(seconds=2)
 async def app_timers():
+    # Будильникам ядро не нужно, а раньше весь блок стоял под
+    # «if core != None». Ядро создавалось только когда кто-то открывал
+    # главную страницу, поэтому колонка без вкладки была беззвучной: будильник
+    # не звонил ровно там, где колонка и нужна. Теперь это работает всегда.
+    if _alarms_dirty[0]:
+        _alarms_load()
+        _alarms_dirty[0] = False
+    _tick[0] += 1
+    if _tick[0] % 300 == 1:
+        # Диагностика раз в пять минут: сколько будильников на нём и когда
+        # следующий. Раньше цикл молчал, и по логу нельзя было понять,
+        # крутится ли он вообще, - а будильники не звонили именно из-за этого.
+        nxt = min([float(a.get("at", 0)) for a in _alarms], default=0)
+        print("alarms tick: будильников %d, следующий через %d с, core %s"
+              % (len(_alarms), int(nxt - time.time()) if nxt else -1,
+                 "есть" if core != None else "нет"), flush=True)
+    fired_now = _alarms_check()
+    # Звонок уходит подключённой плате. Рассылка тут, в асинхронном цикле:
+    # слать из _alarms_check нельзя, он синхронный.
+    if fired_now or _fired_count[0] > _fired_sent[0]:
+        _fired_sent[0] = _fired_count[0]
+        await _ring_devices()
+    elif _fired_count[0] < _fired_sent[0]:
+        _fired_sent[0] = _fired_count[0]   # перезапуск обнулил счётчик
+
     if core != None:
         #print("update timers")
         core._update_timers()
@@ -2082,17 +2224,6 @@ async def app_timers():
         # начнёт гасить слоты, иначе он сгорит как просроченный
         _restore_timers()
         _persist_timers()
-        _alarms_check()
-        # Звонок будильника уходит подключённой плате. Раньше звучал только
-        # браузер, и колонка без вкладки была беззвучной: будильник, ради
-        # которого всё затевалось, молчал именно там, где колонка нужна.
-        # Рассылка тут, в асинхронном цикле: слать из _check_fired нельзя,
-        # он синхронный.
-        if _fired_count[0] > _fired_sent[0]:
-            _fired_sent[0] = _fired_count[0]
-            await _ring_devices()
-        elif _fired_count[0] < _fired_sent[0]:
-            _fired_sent[0] = _fired_count[0]   # перезапуск обнулил счётчик
 
 
 async def _ring_devices():
@@ -2102,8 +2233,11 @@ async def _ring_devices():
     note = json.dumps({"type": "alarm", "at": _fired_last[0],
                        "fired": _fired_count[0]})
     wav = None
+    # Фраза звонка может быть не «Будильник!», а рецептом: «Будильник.
+    # Доброе утро». И если что-то не вышло - колонка говорит и об этом.
+    say = _fired_note[0] or "Будильник!"
     try:
-        wav = await run_in_threadpool(_tts_wav_bytes, "Будильник!")
+        wav = await run_in_threadpool(_tts_wav_bytes, say)
     except Exception:
         wav = None
     for dev_id, dev in list(_dev_clients.items()):

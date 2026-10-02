@@ -13,6 +13,7 @@
 
 import datetime
 import re
+import time
 
 # Час по слову. «полдень» и «полночь» вынесены: это не час, а конкретное
 # время, и «в полдень» в тринадцать не превращается.
@@ -178,7 +179,17 @@ def parse_alarm_phrase(text, now=None):
             repeat = name
             break
 
-    now = now or datetime.datetime.now()
+    # Epoch считаем в секундах от текущего момента, а не через
+    # target.timestamp(). Разница в часах: timestamp() для наивного времени
+    # применяет зону машины, и в контейнере с TZ будильник на 10:07
+    # оказывался на три часа позже - он не звонил никогда, а в списке
+    # показывал «через 10821 с». Здесь считаем разницу в датах, которая
+    # от часов не зависит вовсе.
+    if now is None:
+        base_now = time.time()
+        now = datetime.datetime.fromtimestamp(base_now)
+    else:
+        base_now = None
     base = datetime.datetime(now.year, now.month, now.day, hour, minute)
     delta = 0
     for w in _DAY_WORDS:
@@ -212,7 +223,11 @@ def parse_alarm_phrase(text, now=None):
         # Голосом без экрана надо сказать, в какой день, иначе «08:00»
         # на понедельник и на четверг звучат одинаково.
         label += " в " + _DOW_ACC[want_dow]
-    return int(target.timestamp()), label, repeat
+    delta_sec = (target - now).total_seconds()
+    if base_now is None:
+        # Проверки подставляют своё время - там epoch считается от него же.
+        return int(target.timestamp()), label, repeat
+    return int(base_now + delta_sec), label, repeat
 
 
 def describe_repeat(repeat):
@@ -342,6 +357,24 @@ def selfcheck():
     got = parse_alarm_phrase("буди в 8 утра на всё", at(2026, 10, 1, 6, 0))
     if got and "в " in got[1] and got[1].endswith(("вс",)):
         fails.append("«всё» принято за воскресенье: %r" % (got[1],))
+
+    # Будильник должен сработать через минуту-две, а не через несколько
+    # часов. Раньше epoch считался через target.timestamp(), который
+    # применяет зону машины: в контейнере с TZ будильник на 10:07 в 10:06
+    # показывал «через 10821 с» и не звонил никогда.
+    # Время берём заведомо будущее, иначе проверка сама себе противоречит:
+    # на «10:07» в десять десять перенос на завтра - это правильно.
+    soon = time.time() + 150
+    hh = time.localtime(soon).tm_hour
+    mm = time.localtime(soon).tm_min
+    got = parse_alarm_phrase("буди в %02d:%02d" % (hh, mm))
+    if not got:
+        fails.append("будильник на цифровое время не разобран")
+    else:
+        left = got[0] - time.time()
+        if not (60 < left <= 3700):
+            fails.append("будильник на %02d:%02d через %.0f с - время пошло "
+                         "не туда" % (hh, mm, left))
 
     for f in fails:
         print("FAIL  " + f)
