@@ -271,6 +271,10 @@
       <div id="alarm"></div>
     </section>
     <section>
+      <h2>Дом</h2>
+      <div id="home"></div>
+    </section>
+    <section>
       <h2>Плеер</h2>
       <div id="player"></div>
     </section>
@@ -408,6 +412,57 @@ function renderAlarm() {
   });
 }
 
+// Устройства умного дома. Дом должен быть виден, а не только слышен:
+// колонка может ответить «свет включено», но из интерфейса не видно,
+// что в квартире вообще происходит.
+async function pollHome() {
+  const box = $("home");
+  if (!box) return;
+  try {
+    const r = await fetch(API + "/home");
+    if (!r.ok) return;
+    const d = await r.json();
+    const devs = d.devices || [];
+    box.innerHTML = "";
+    if (!devs.length) {
+      const e = document.createElement("div");
+      e.className = "pl-note";
+      e.textContent = "устройства не описаны";
+      box.appendChild(e);
+      return;
+    }
+    devs.forEach((dv) => {
+      const row = document.createElement("div");
+      row.className = "al-row";
+      const name = document.createElement("span");
+      name.className = "al-time";
+      name.textContent = dv.name || dv.id || "?";
+      let label;
+      if (!dv.connected) {
+        label = "не подключено";
+      } else if (dv.kind === "sensor") {
+        label = (dv.value === null || dv.value === undefined)
+          ? "нет данных" : String(dv.value);
+      } else if (dv.state === "on") {
+        label = dv.kind === "light" && dv.brightness !== undefined
+          ? "включено, " + dv.brightness + "%" : "включено";
+      } else {
+        label = "выключено";
+      }
+      const st = document.createElement("span");
+      st.className = "al-total";
+      st.textContent = label;
+      row.append(name, st);
+      if (dv.kind !== "sensor" && dv.connected) {
+        row.append(chip(dv.state === "on" ? "Выключить" : "Включить",
+          () => doAction((dv.state === "on" ? "выключи " : "включи ")
+                        + (dv.name || ""))));
+      }
+      box.appendChild(row);
+    });
+  } catch (e) { /* сеть моргнула */ }
+}
+
 async function pollTimers() {
   try {
     // Сервер отдаёт звонки, номер которых больше уже обработанного, поэтому
@@ -472,6 +527,9 @@ function startAlarmPoll() {
   if (alarm.poll) return;
   pollTimers();
   alarm.poll = setInterval(pollTimers, 2000);
+// Дом опрашивается реже: устройства меняются нечасто, а лишний запрос
+// каждые две секунды ничего не добавляет.
+setInterval(pollHome, 7000); pollHome();
 }
 
 /* ---------- плеер ---------- */

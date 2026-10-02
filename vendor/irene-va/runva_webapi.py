@@ -1113,6 +1113,7 @@ try:
     from jane_recipe import (Action as _Action,
                              parse_actions as _parse_actions,
                              split_recipe as _split_recipe)
+    from jane_habits import Habits as _Habits
 except ImportError:
     import sys as _sys
     _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -1125,9 +1126,14 @@ except ImportError:
     from jane_recipe import (Action as _Action,
                              parse_actions as _parse_actions,
                              split_recipe as _split_recipe)
+    from jane_habits import Habits as _Habits
 
 # Контекст один на колонку: он и должен быть общим для браузера и платы.
 _CTX = _CTXClass()
+
+# Привычки: город, частые команды, темп. Живут в options рядом с остальными
+# настройками и переживают пересборку контейнера.
+_HABITS = _Habits(path=os.path.join(OPTIONS_DIR, "jane_habits.json")).load()
 
 
 def _load_home():
@@ -1238,6 +1244,17 @@ def _home_device_view(d):
         if d.get("kind") == "light":
             out["brightness"] = h.driver.brightness(d.get("id"))
     return out
+
+
+@app.get("/habits")
+async def habits_state():
+    """Что колонка запомнила. Видно, а не спрятано."""
+    import time as _t
+    return {"city": _HABITS.city, "asked": _HABITS.asked,
+            "spoke": _HABITS.spoke,
+            "top": [{"text": t, "count": c} for t, c in _HABITS.top(5)],
+            "pace": _HABITS.pace(), "volume": _HABITS.volume(),
+            "hour": _t.localtime().tm_hour}
 
 
 @app.get("/home")
@@ -1919,8 +1936,41 @@ def _with_call_name(cmd):
     return (name + " " + cmd) if name else cmd
 
 
+def _cap_city(text):
+    """Город с большой буквы: «Гомель», а не «гомель»."""
+    t = str(text or "").strip()
+    return (t[0].upper() + t[1:]) if t else t
+
+
+_cap = _cap_city  # короткое имя для строк ответа
+
+
+def _weather_city_apply():
+    """Подставить запомненный город в погоду.
+
+    Плагин читает город из своих настроек, а не из фразы. Если человек один
+    раз сказал «я живу в Гомеле», погода дальше должна быть про Гомель, а не
+    про тот город, что стоял в настройках при сборке контейнера.
+    """
+    city = _HABITS.city
+    if not city or core is None:
+        return None
+    try:
+        import vacore
+        opt = core.plugin_options("plugin_weather_wttr")
+        if opt and opt.get("location") != city:
+            opt["location"] = city
+            return city
+    except Exception as e:
+        print("habits: город не подставлен (%s: %s)" % (type(e).__name__, e),
+              flush=True)
+    return None
+
+
 def _try_plugins(cmd):
     """Возвращает текст ответа плагина или None, если плагин не сработал."""
+    if any(w in (cmd or "").lower() for w in ("погод", "градус", "дождь")):
+        _weather_city_apply()
     try:
         saved_tts = core.remoteTTS
         saved_res = core.remoteTTSResult
@@ -2052,6 +2102,21 @@ def _answer_text(cmd):
     появлялась, в другом нет.
     """
     low = (cmd or "").lower().replace("ё", "е")
+
+    # Привычки: колонка запоминает, где вы живёте и что вы часто просите.
+    # Благодарить за это не надо - привычка это молчаливое удобство.
+    _city = _HABITS.note_city(cmd)
+    if _city:
+        _HABITS.save()
+        _weather_city_apply()
+        # Отвечаем сами и коротко. Если отдать фразу в модель, та начинает
+        # рассуждать вслух: «В Гомеле - это город Белоруссии, вы правы,
+        # что вы живете...». Колонка комментировать себя не должна.
+        return ("Запомнила: %s." % _cap(_city), "habits", None)
+    if _HABITS.note_command(cmd):
+        _HABITS.save()
+    if re.search(r"что\s+я\s+(?:обычно|чаще всего|люблю)", low):
+        return _HABITS.describe_top(), "habits", None
     # Уточнение продолжает разговор, а не начинает новый: «буди в семь», а
     # потом «а в выходные?» - это тот же час в другой повтор. Непонятное
     # уточнение уходит дальше как есть, колонка не додумывает.
