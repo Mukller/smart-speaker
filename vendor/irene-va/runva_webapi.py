@@ -1116,6 +1116,10 @@ try:
     from jane_habits import Habits as _Habits
     from jane_when import answer as _when_answer
     from jane_control import Control as _Control
+    from jane_remind import (parse_reminder as _parse_reminder,
+                           is_list as _remind_is_list,
+                           is_forget as _remind_is_forget,
+                           when_text as _remind_when)
 except ImportError:
     import sys as _sys
     _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -1131,6 +1135,10 @@ except ImportError:
     from jane_habits import Habits as _Habits
     from jane_when import answer as _when_answer
     from jane_control import Control as _Control
+    from jane_remind import (parse_reminder as _parse_reminder,
+                           is_list as _remind_is_list,
+                           is_forget as _remind_is_forget,
+                           when_text as _remind_when)
 
 # Контекст один на колонку: он и должен быть общим для браузера и платы.
 _CTX = _CTXClass()
@@ -1143,6 +1151,115 @@ _HABITS = _Habits(path=os.path.join(OPTIONS_DIR, "jane_habits.json")).load()
 # перезапуск - колонка, которую убавили, не должна после перезагрузки
 # снова кричать.
 _CONTROL = _Control(path=os.path.join(OPTIONS_DIR, "jane_control.json")).load()
+
+# Напоминания - не будильники. Будильник звонит, а напоминание говорит,
+# что человек просил не забыть. Разные вещи: будильник живёт по времени
+# суток, напоминание - про конкретное дело.
+_REMIND_STATE = os.path.join(OPTIONS_DIR, "jane_reminders.json")
+_REMIND_LIST = []
+_REMIND_SEQ = [0]
+# Чего ждём уточнения: сказали «напомни купить хлеб» без времени - колонка
+# обязана спросить, а не придумать время сама.
+_REMIND_PENDING = {"text": None}
+
+
+def _reminders_load():
+    global _REMIND_LIST
+    try:
+        with open(_REMIND_STATE, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        _REMIND_SEQ[0] = int(d.get("seq") or 0)
+        _REMIND_LIST = list(d.get("items") or [])
+    except Exception:
+        _REMIND_LIST = []
+    return _REMIND_LIST
+
+
+def _reminders_save():
+    try:
+        tmp = _REMIND_STATE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"seq": _REMIND_SEQ[0], "items": _REMIND_LIST},
+                      f, ensure_ascii=False)
+        os.replace(tmp, _REMIND_STATE)
+    except Exception as e:
+        print("reminders save failed: %s: %s" % (type(e).__name__, e),
+              flush=True)
+
+
+def _reminders_add(text, at):
+    _REMIND_SEQ[0] += 1
+    item = {"id": _REMIND_SEQ[0], "text": text, "at": float(at), "done": 0}
+    _REMIND_LIST.append(item)
+    _reminders_save()
+    return item
+
+
+def _reminders_public():
+    now = time.time()
+    out = []
+    for r in _REMIND_LIST:
+        try:
+            at = float(r.get("at") or 0)
+        except Exception:
+            continue
+        out.append({"id": r.get("id"), "text": r.get("text"),
+                    "left": int(at - now), "when": _remind_when(at)})
+    return sorted(out, key=lambda x: x["left"])
+
+
+# Что колонка должна произнести при срабатывании напоминаний. Раздача идёт
+# из асинхронного цикла: слать по сокету из синхронной проверки нельзя.
+_REMIND_SAY = []
+
+
+def _reminders_check():
+    """Проверить напоминания. Возвращает, что надо произнести."""
+    global _REMIND_LIST
+    now = time.time()
+    due = [r for r in _REMIND_LIST if float(r.get("at") or 0) <= now]
+    if not due:
+        return []
+    _REMIND_LIST = [r for r in _REMIND_LIST if r not in due]
+    _reminders_save()
+    said = []
+    for r in due:
+        print("remind fired: id=%s text=%s" % (r.get("id"), r.get("text")),
+              flush=True)
+        said.append(str(r.get("text") or ""))
+    return said
+
+
+async def _reminder_say(texts):
+    """Сказать напоминание подключённым платам."""
+    if not _dev_clients or not texts:
+        return
+    note = json.dumps({"type": "reminder", "texts": texts})
+    wav = None
+    try:
+        wav = await run_in_threadpool(_tts_wav_bytes,
+                                      "Напоминание. " + ". ".join(texts))
+    except Exception:
+        wav = None
+    for dev_id, dev in list(_dev_clients.items()):
+        ws = dev.get("ws")
+        if ws is None:
+            continue
+        try:
+            await ws.send_text(note)
+            if wav:
+                await ws.send_bytes(wav)
+        except Exception:
+            _dev_clients.pop(dev_id, None)
+
+
+@app.get("/reminders")
+async def reminders():
+    return {"items": _reminders_public(), "count": len(_REMIND_LIST),
+            "pending": _REMIND_PENDING.get("text")}
+
+
+_reminders_load()
 
 
 def _load_home():
@@ -2177,6 +2294,46 @@ def _answer_text(cmd):
         if got:
             return got, "control", _ctl
 
+    # Напоминания. Раньше модель отвечала на них уверенно и неверно: на
+    # «напомни купить хлеб» она предлагала заказать хлеб по интернету.
+    # Согласиться сделать то, чего не делаешь, - худший ответ.
+    if _remind_is_list(cmd):
+        if not _REMIND_LIST:
+            return "Напоминаний нет.", "remind", None
+        return ("Напомнить: %s."
+                % "; ".join("%s — %s" % (r["text"], r["when"])
+                            for r in _reminders_public()[:5])), "remind", None
+    if _remind_is_forget(cmd):
+        _REMIND_PENDING["text"] = None
+        if not _REMIND_LIST:
+            return "Напоминаний и не было.", "remind", None
+        _REMIND_LIST[:] = []
+        _reminders_save()
+        return "Забыла все напоминания.", "remind", None
+    _rem = _parse_reminder(cmd)
+    if _rem:
+        if _rem["at"] is None:
+            # Время не названо. Спрашиваем и ждём уточнения, а не выдумываем.
+            _REMIND_PENDING["text"] = _rem["text"]
+            return ("Запомнила: %s. Когда напомнить?" % _rem["text"],
+                    "remind", None)
+        it = _reminders_add(_rem["text"], _rem["at"])
+        _REMIND_PENDING["text"] = None
+        return ("Напомню через %s: %s."
+                % (_remind_when(it["at"]).replace("через ", ""),
+                   it["text"])), "remind", None
+
+    # Уточнение к прошлому напоминанию: «через час» после вопроса.
+    if _REMIND_PENDING["text"] and re.search(
+            r"\b(?:через|в|во|на)\s+\w+", (cmd or "").lower()):
+        got = _parse_reminder("напомни " + _REMIND_PENDING["text"] + " " + cmd)
+        if got and got["at"]:
+            it = _reminders_add(got["text"], got["at"])
+            _REMIND_PENDING["text"] = None
+            return ("Напомню через %s: %s."
+                    % (_remind_when(it["at"]).replace("через ", ""),
+                       it["text"])), "remind", None
+
     player = _player_command(cmd)
     if player is not None:
         reply, action = player
@@ -2334,6 +2491,13 @@ async def app_timers():
         await _ring_devices()
     elif _fired_count[0] < _fired_sent[0]:
         _fired_sent[0] = _fired_count[0]   # перезапуск обнулил счётчик
+
+    # Напоминания живут отдельно от будильников: это не звонок, а «ты
+    # просила не забыть». Проверяются здесь же, потому что больше их
+    # проверять некому.
+    _rem_now = _reminders_check()
+    if _rem_now:
+        await _reminder_say(_rem_now)
 
     if core != None:
         #print("update timers")

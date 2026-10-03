@@ -77,6 +77,11 @@ jobs:
       - name: control
         run: python vendor/irene-va/jane_control.py
 
+      # Напоминания: «напомни купить хлеб». Без времени - спросим,
+      # а не придумаем время сами.
+      - name: reminders
+        run: python vendor/irene-va/jane_remind.py
+
       # Время и дата голосом. Часы должны отвечать временем, а не тем,
       # как звучит правдоподобный ответ.
       - name: clock
