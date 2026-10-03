@@ -1115,6 +1115,7 @@ try:
                              split_recipe as _split_recipe)
     from jane_habits import Habits as _Habits
     from jane_when import answer as _when_answer
+    from jane_control import Control as _Control
 except ImportError:
     import sys as _sys
     _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -1129,6 +1130,7 @@ except ImportError:
                              split_recipe as _split_recipe)
     from jane_habits import Habits as _Habits
     from jane_when import answer as _when_answer
+    from jane_control import Control as _Control
 
 # Контекст один на колонку: он и должен быть общим для браузера и платы.
 _CTX = _CTXClass()
@@ -1136,6 +1138,11 @@ _CTX = _CTXClass()
 # Привычки: город, частые команды, темп. Живут в options рядом с остальными
 # настройками и переживают пересборку контейнера.
 _HABITS = _Habits(path=os.path.join(OPTIONS_DIR, "jane_habits.json")).load()
+
+# Управление колонкой: повтори, громче, тише, стоп. Громкость переживает
+# перезапуск - колонка, которую убавили, не должна после перезагрузки
+# снова кричать.
+_CONTROL = _Control(path=os.path.join(OPTIONS_DIR, "jane_control.json")).load()
 
 
 def _load_home():
@@ -2157,6 +2164,19 @@ def _answer_text(cmd):
         _CTX.remember(_CTX_TOPIC_HOME)
         return home[0], "home", home[1]
 
+    # Управление колонкой: повтори, громче, тише, стоп. Раньше плеера, чтобы
+    # «стоп» останавливал музыку, а не уходил в модель.
+    _ctl = _CONTROL.parse(cmd)
+    if _ctl == "stop":
+        st = _player_command("стоп")
+        if st and st[1]:
+            return ("Остановила.", "control", "stop")
+        return ("Остановилась.", "control", None)
+    if _ctl in ("repeat", "louder", "softer"):
+        got = _CONTROL.apply(_ctl)
+        if got:
+            return got, "control", _ctl
+
     player = _player_command(cmd)
     if player is not None:
         reply, action = player
@@ -2175,6 +2195,9 @@ async def sendSimpleTxtCmd(cmd:str,returnFormat:str = "saytxt"):
     if not _rate_limit("cmd", RL_LIMIT_CMD):
         raise HTTPException(429, "слишком много команд, подожди минуту")
     reply, source, action = await run_in_threadpool(_answer_text, cmd)
+    # Запоминаем ответ для «повтори». Раньше колонка на «повтори» уходила
+    # в модель и пересказывала случайный текст.
+    _CONTROL.remember(reply)
     return {"restxt": reply, "source": source, "action": action}
 
 # Streaming endpoint: returns thinking + response as Server-Sent Events
@@ -2197,6 +2220,30 @@ async def sendSimpleTxtCmdStream(cmd:str, model:str = "qwen2.5:0.5b-instruct"):
             yield "data: [DONE]\n\n"
             return
         # Плеер: действие возвращаем структурно, интерфейс его выполнит
+        # Управление колонкой: повтори, громче, тише, стоп. Раньше плеера:
+        # «стоп» должен остановить музыку, а не уйти в модель.
+        _ctl = _CONTROL.parse(cmd)
+        if _ctl == "stop":
+            st = _player_command("стоп")
+            if st and st[1]:
+                yield "data: " + json.dumps({"response": "Остановила.",
+                                             "source": "control",
+                                             "action": "stop"}) + "\n\n"
+                yield "data: [DONE]\n\n"
+                return
+            yield "data: " + json.dumps({"response": "Остановилась.",
+                                         "source": "control"}) + "\n\n"
+            yield "data: [DONE]\n\n"
+            return
+        if _ctl in ("repeat", "louder", "softer"):
+            got = _CONTROL.apply(_ctl)
+            if got:
+                yield "data: " + json.dumps({"response": got,
+                                             "source": "control",
+                                             "action": _ctl}) + "\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
         player = _player_command(cmd)
         if player is not None:
             reply, action = player

@@ -73,6 +73,10 @@ jobs:
       - name: habits
         run: python vendor/irene-va/jane_habits.py
 
+      # Управление колонкой: повтори, громче, тише, стоп.
+      - name: control
+        run: python vendor/irene-va/jane_control.py
+
       # Время и дата голосом. Часы должны отвечать временем, а не тем,
       # как звучит правдоподобный ответ.
       - name: clock
