@@ -73,6 +73,11 @@ jobs:
       - name: habits
         run: python vendor/irene-va/jane_habits.py
 
+      # Время и дата голосом. Часы должны отвечать временем, а не тем,
+      # как звучит правдоподобный ответ.
+      - name: clock
+        run: python vendor/irene-va/jane_when.py
+
       # Детектор речи - чистая логика, ему не нужны ни модель, ни сеть.
       # Настройка порога тишины ломает фразы незаметно: заметить можно было
       # только живым разговором. Полный requirements.txt с torch и gradio
