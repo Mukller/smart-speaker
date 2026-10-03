@@ -1114,6 +1114,7 @@ try:
                              parse_actions as _parse_actions,
                              split_recipe as _split_recipe)
     from jane_habits import Habits as _Habits
+    from jane_when import answer as _when_answer
 except ImportError:
     import sys as _sys
     _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -1127,6 +1128,7 @@ except ImportError:
                              parse_actions as _parse_actions,
                              split_recipe as _split_recipe)
     from jane_habits import Habits as _Habits
+    from jane_when import answer as _when_answer
 
 # Контекст один на колонку: он и должен быть общим для браузера и платы.
 _CTX = _CTXClass()
@@ -2117,6 +2119,13 @@ def _answer_text(cmd):
         _HABITS.save()
     if re.search(r"что\s+я\s+(?:обычно|чаще всего|люблю)", low):
         return _HABITS.describe_top(), "habits", None
+
+    # Время и дата - раньше модели. Модель не знает, который час: она знает,
+    # как звучит правдоподобный ответ. Часы, которые врут о времени, - не
+    # часы.
+    when_reply = _when_answer(cmd)
+    if when_reply:
+        return when_reply, "when", None
     # Уточнение продолжает разговор, а не начинает новый: «буди в семь», а
     # потом «а в выходные?» - это тот же час в другой повтор. Непонятное
     # уточнение уходит дальше как есть, колонка не додумывает.
