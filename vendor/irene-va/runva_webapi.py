@@ -402,6 +402,27 @@ def _tts_ready():
         return False
 
 
+# Опорный пик синтеза. Громкость - доля от него, поэтому 100 - это ровно
+# прежнее поведение, и сравнивать старые и новые записи можно честно.
+_PEAK_REF = 0.9
+
+
+def _volume_gain():
+    """Громкость как доля 0..1. Готовность _CONTROL проверяется отдельно:
+    синтез бывает раньше, чем модуль управления поднялся."""
+    ctrl = globals().get("_CONTROL")
+    vol = getattr(ctrl, "volume", 100)
+    try:
+        vol = int(vol)
+    except (TypeError, ValueError):
+        vol = 100
+    if vol < 0:
+        vol = 0
+    elif vol > 100:
+        vol = 100
+    return vol / 100.0
+
+
 def _tts_wav_bytes(text, speaker_id=0):
     """Синтез в WAV-байты. Используется и /tts, и озвучкой будильника."""
     import io
@@ -422,14 +443,27 @@ def _tts_wav_bytes(text, speaker_id=0):
         with open(name, "rb") as f:
             return f.read()
 
-    data = np.asarray(audio)
-    if np.issubdtype(data.dtype, np.floating):
-        peak = float(np.max(np.abs(data))) if data.size else 0.0
-        if peak > 0:
-            data = data / peak * 0.9     # тихие фразы иначе почти не слышны
-        pcm = (data * 32767.0).astype("<i2")
+    # Любой вход приводим к float в диапазоне -1..1 и нормализуем оттуда.
+    # Раньше здесь стояло «если dtype плавающий», и это было ловушкой:
+    # synth_audio отдаёт int16, условие всегда было ложным, и вся обработка
+    # - нормализация и громкость - не выполнялась НИ РАЗУ. Колонка при этом
+    # говорила пиком 5142 из 32767, то есть на 16% амплитуды, а комментарий
+    # рядом утверждал, что тихие фразы «иначе почти не слышны». Проверять
+    # надо было пик байт, а не наличие кода.
+    d32 = np.asarray(audio)
+    if np.issubdtype(d32.dtype, np.integer):
+        data = d32.astype(np.float32) / 32768.0
     else:
-        pcm = data.astype("<i2")
+        data = d32.astype(np.float32)
+        if data.size and float(np.max(np.abs(data))) > 1.5:
+            data = data / 32768.0
+    peak = float(np.max(np.abs(data))) if data.size else 0.0
+    if peak > 0:
+        # Сначала ровный уровень, потом громкость. Порядок принципиален:
+        # нормализация к пику отменяет усиление, сделанное ДО неё, поэтому
+        # «громче»/«тише» меняли только цифру в сохранённом состоянии.
+        data = data / peak * (_PEAK_REF * _volume_gain())
+    pcm = np.clip(data * 32767.0, -32768, 32767).astype("<i2")
 
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
