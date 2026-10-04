@@ -91,6 +91,10 @@ jobs:
       - name: politeness
         run: python vendor/irene-va/jane_bye.py
 
+      # Фильтр ответа модели: мусор не произносится.
+      - name: guard
+        run: python vendor/irene-va/jane_guard.py
+
       # Время и дата голосом. Часы должны отвечать временем, а не тем,
       # как звучит правдоподобный ответ.
       - name: clock

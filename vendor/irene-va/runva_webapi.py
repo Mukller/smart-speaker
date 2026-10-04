@@ -1153,6 +1153,7 @@ try:
     from jane_about import answer as _about_answer
     from jane_bye import (answer as _bye_answer,
                        strip_politeness as _strip_polite)
+    from jane_guard import abstain as _guard_answer
     from jane_remind import (parse_reminder as _parse_reminder,
                            is_list as _remind_is_list,
                            is_forget as _remind_is_forget,
@@ -1172,10 +1173,32 @@ except ImportError:
     from jane_habits import Habits as _Habits
     from jane_when import answer as _when_answer
     from jane_control import Control as _Control
+    from jane_about import answer as _about_answer
+    from jane_bye import (answer as _bye_answer,
+                          strip_politeness as _strip_polite)
+    from jane_guard import abstain as _guard_answer
     from jane_remind import (parse_reminder as _parse_reminder,
-                           is_list as _remind_is_list,
-                           is_forget as _remind_is_forget,
-                           when_text as _remind_when)
+                             is_list as _remind_is_list,
+                             is_forget as _remind_is_forget,
+                             when_text as _remind_when)
+
+# Проверка импортов. Раньше отсутствие модуля приводило к NameError на
+# первом же запросе, и виновника было не найти: сообщение указывало на строку
+# ответа, а не на отсутствующий файл. Отсутствие одного из этих имён означает,
+# что деплой положил не все файлы и колонка работает неправильно.
+_JANE_REQUIRED = (
+    "_CTXClass", "_topic_of", "_describe_repeat", "_Home", "_LocalDriver",
+    "_Action", "_parse_actions", "_split_recipe", "_Habits", "_when_answer",
+    "_Control", "_about_answer", "_bye_answer", "_strip_polite",
+    "_guard_answer", "_parse_reminder", "_remind_is_list",
+    "_remind_is_forget", "_remind_when",
+)
+_jane_missing = [n for n in _JANE_REQUIRED if n not in globals()]
+if _jane_missing:
+    raise RuntimeError(
+        "не загружены модули колонки: %s. Почти всегда это deploy, "
+        "положивший не все файлы: сверь список копирования и журнал "
+        "развёртывания." % ", ".join(_jane_missing))
 
 # Контекст один на колонку: он и должен быть общим для браузера и платы.
 _CTX = _CTXClass()
@@ -2429,7 +2452,12 @@ def _answer_text(cmd):
         # таймер оставили бы след в контексте, даже если их не было.
         _CTX.remember(_topic_of(cmd) or "")
         return plugin_answer, "plugin", None
-    return call_ollama(cmd), "llm", None
+    # Ответ модели проходит фильтр. Это не косметика: модель за день
+    # работы выдала «Я ИИ, созданный Alibaba Cloud», «实时天气信息» и
+    # «обратитесь к оператору связи» - оператора у колонки нет.
+    # Предположение, что большая модель это плавная деградация,
+    # неверно: это генератор без состояния «не знаю».
+    return _guard_answer(call_ollama(cmd)), "llm", None
 
 
 @app.get("/sendTxtCmd")
@@ -2553,7 +2581,10 @@ async def sendRawTxt(rawtxt:str,returnFormat:str = "none"):
     return sendRawTxtOrig(rawtxt,returnFormat)
 
 def sendRawTxtOrig(rawtxt:str,returnFormat:str = "saytxt"):
-    result = call_ollama(rawtxt)
+    # Тот же фильтр, что и в /sendTxtCmd: ответ модели не должен попадать к
+    # человеку мимо проверки. Иначе текстовый путь фильтруется, а голосовой
+    # нет, и колонка в зависимости от канала ведёт себя по-разному.
+    result = _guard_answer(call_ollama(rawtxt))
     return {"restxt": result}
 
 @app.on_event("shutdown")

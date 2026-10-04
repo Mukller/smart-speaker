@@ -246,7 +246,7 @@ say "2/5 файлы внутри контейнера"
 for rel in webapi_client/index.html webapi_client/manifest.json \
            webapi_client/icon.svg \
            plugins/plugin_greetings.py \
-           voice_profiles.json runva_webapi.py jane_audio.py jane_time.py jane_wake.py jane_context.py jane_home.py jane_recipe.py jane_habits.py jane_when.py jane_control.py jane_remind.py jane_about.py jane_bye.py; do
+           voice_profiles.json runva_webapi.py jane_audio.py jane_time.py jane_wake.py jane_context.py jane_home.py jane_recipe.py jane_habits.py jane_when.py jane_control.py jane_remind.py jane_about.py jane_bye.py jane_guard.py; do
     [ -f "$VENDOR/$rel" ] || { warn "нет файла $rel — пропускаю"; continue; }
     docker cp "$VENDOR/$rel" "$CONTAINER:/app/vendor/irene-va/$rel" \
         || die "docker cp не удался: $rel"
@@ -572,6 +572,37 @@ name=$(docker logs "$CONTAINER" --since 3m 2>&1 | grep -i 'Assistant names' | ta
 echo "$name" | grep -q "$ASSISTANT" \
   && ok "ассистент: $ASSISTANT" \
   || { bad "в логе: $name"; fails=1; }
+
+# Каждый модуль колонки должен не просто лежать на диске, а импортироваться.
+# Раньше эта проверка отсутствовала, и развёртывание рапортовало «все
+# проверки пройдены» при сломанном приложении: файл не доехал, импорт падал
+# в ветку except, а та не знала про этот модуль и молчала до первого запроса.
+JANE_MODULES="jane_audio jane_time jane_wake jane_context jane_home \
+jane_recipe jane_habits jane_when jane_control jane_remind jane_about \
+jane_bye jane_guard"
+
+imp_ok=1
+for m in $JANE_MODULES; do
+  if docker exec "$CONTAINER" python -c "import $m" >/dev/null 2>&1; then
+    :
+  else
+    bad "модуль не импортируется: $m"
+    imp_ok=0
+  fi
+done
+[ "$imp_ok" -eq 1 ] \
+  && ok "модули импортируются ($JANE_MODULES)" \
+  || fails=1
+
+# И сам модуль веба: он поднимает проверку импортов при старте, и если
+# файла нет, контейнер не должен тихо работать на одной ветке.
+if docker exec "$CONTAINER" python -c \
+   "import importlib,sys; importlib.import_module('runva_webapi')" >/dev/null 2>&1; then
+  ok "runva_webapi импортируется целиком"
+else
+  bad "runva_webapi не импортируется - смотри лог контейнера"
+  fails=1
+fi
 
 printf '\n'
 if [ "$fails" -eq 0 ]; then
