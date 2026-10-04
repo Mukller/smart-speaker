@@ -1117,6 +1117,8 @@ try:
     from jane_when import answer as _when_answer
     from jane_control import Control as _Control
     from jane_about import answer as _about_answer
+    from jane_bye import (answer as _bye_answer,
+                       strip_politeness as _strip_polite)
     from jane_remind import (parse_reminder as _parse_reminder,
                            is_list as _remind_is_list,
                            is_forget as _remind_is_forget,
@@ -2259,6 +2261,12 @@ def _answer_text(cmd):
     """
     low = (cmd or "").lower().replace("ё", "е")
 
+    # Вежливость снимается раньше всего: «спасибо, а что сейчас погода» -
+    # это один вопрос с вежливостью в начале, а не отказ отвечать.
+    _polite_tail = _strip_polite(cmd)
+    if _polite_tail:
+        cmd = _polite_tail
+
     # Привычки: колонка запоминает, где вы живёте и что вы часто просите.
     # Благодарить за это не надо - привычка это молчаливое удобство.
     _city = _HABITS.note_city(cmd)
@@ -2273,6 +2281,12 @@ def _answer_text(cmd):
         _HABITS.save()
     if re.search(r"что\s+я\s+(?:обычно|чаще всего|люблю)", low):
         return _HABITS.describe_top(), "habits", None
+
+    # Вежливость и прощание. Отвечать на «спокойной ночи» абзацем
+    # от модели - значило врать тем, что она умеет.
+    _bye = _bye_answer(cmd)
+    if _bye:
+        return _bye[0], "bye", None
 
     # Кто она и что умеет. Раньше на «кто ты» отвечала модель, и та
     # представлялась Alibaba: колонка называлась чужой компанией.
@@ -2404,6 +2418,19 @@ async def sendSimpleTxtCmdStream(cmd:str, model:str = "qwen2.5:0.5b-instruct"):
         raise HTTPException(429, "слишком много команд, подожди минуту")
 
     async def event_generator():
+        # Вежливость и здесь: голосом «спасибо» должно звучать так же,
+        # как в текстовом ответе. Иначе колонка в зависимости от канала
+        # отвечает на одно и то же по-разному.
+        _polite_tail = _strip_polite(cmd)
+        if _polite_tail:
+            cmd = _polite_tail
+        _bye = _bye_answer(cmd)
+        if _bye:
+            yield "data: " + json.dumps({"response": _bye[0],
+                                         "source": "bye"}) + "\n\n"
+            yield "data: [DONE]\n\n"
+            return
+
         # Умный дом раньше плеера и модели: «включи свет» - это про дом,
         # а не про музыку и не повод спросить языковую модель.
         home = _home_answer(cmd)
