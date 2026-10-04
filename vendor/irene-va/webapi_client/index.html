@@ -802,6 +802,10 @@ async function hotStart() {
     hot.proc.onaudioprocess = (e) => {
       if (!hot.on) return;
       const ch = e.inputBuffer.getChannelData(0);
+      // Колонка говорит - накопленное выбрасываем целиком, а не дописываем.
+      // Иначе в окно распознавания попал бы голос колонки и она отвечала бы
+      // сама себе.
+      if (speaking) { hot.buf = []; hot.bufLen = 0; return; }
       hot.buf.push(new Float32Array(ch));
       hot.bufLen += ch.length;
       if (hot.bufLen >= hot.want) hotFlush(false);
@@ -1126,6 +1130,22 @@ $("input").addEventListener("input", (e) => {
    Если эндпоинт недоступен, откатываемся на Web Speech API. */
 let voiceAudio = null;
 
+/* Полудуплекс: пока колонка говорит, микрофон её не слышит.
+   Без этого колонка слышит себя и отвечает на собственный голос - сначала
+   один раз, а потом уже сама с собой. Разбор уходит на сервер, звук колонки
+   длиннее обычного запроса, и эха от устройства ждать нельзя. На устройстве
+   это будет отдельная заглушка микрофона, здесь - отбрасывание накопленного. */
+let speaking = false;
+function setSpeaking(on) {
+  speaking = !!on;
+  // Если колонка заговорила посреди записи, запись обрывается: иначе в
+  // распознавание уйдёт голос колонки.
+  if (speaking && typeof mediaRec !== "undefined" && mediaRec
+      && mediaRec.state === "recording") {
+    try { mediaRec.stop(); } catch (e) { /* уже остановлен */ }
+  }
+}
+
 function setVoice(on) {
   state.voice = !!on;
   writeState("dzh_voice", state.voice);
@@ -1140,6 +1160,7 @@ function stopVoice() {
     voiceAudio.pause();
     voiceAudio = null;
   }
+  setSpeaking(false);
   if ("speechSynthesis" in window) speechSynthesis.cancel();
 }
 
@@ -1155,6 +1176,7 @@ function fallbackSpeak(t) {
 async function speak(text) {
   const t = (text || "").trim().slice(0, 1200);
   if (!state.voice || !t) return;
+  if (speaking) return;   // не перебиваем колонку саму себя
   stopVoice();
   try {
     const r = await fetch(API + "/tts?text=" + encodeURIComponent(t));
@@ -1162,10 +1184,13 @@ async function speak(text) {
     const blob = await r.blob();
     const url = URL.createObjectURL(blob);
     voiceAudio = new Audio(url);
-    voiceAudio.onended = () => { URL.revokeObjectURL(url); voiceAudio = null; };
+    voiceAudio.onended = () => { URL.revokeObjectURL(url); voiceAudio = null; setSpeaking(false); };
+    voiceAudio.onerror = () => { setSpeaking(false); };
     // автозапуск может быть заблокирован до жеста — тогда SpeechSynthesis
-    voiceAudio.play().catch(() => fallbackSpeak(t));
+    setSpeaking(true);
+    voiceAudio.play().catch(() => { setSpeaking(false); fallbackSpeak(t); });
   } catch (e) {
+    setSpeaking(false);
     fallbackSpeak(t);
   }
 }
