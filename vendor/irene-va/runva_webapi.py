@@ -1116,6 +1116,7 @@ try:
     from jane_habits import Habits as _Habits
     from jane_when import answer as _when_answer
     from jane_control import Control as _Control
+    from jane_about import answer as _about_answer
     from jane_remind import (parse_reminder as _parse_reminder,
                            is_list as _remind_is_list,
                            is_forget as _remind_is_forget,
@@ -1151,6 +1152,35 @@ _HABITS = _Habits(path=os.path.join(OPTIONS_DIR, "jane_habits.json")).load()
 # перезапуск - колонка, которую убавили, не должна после перезагрузки
 # снова кричать.
 _CONTROL = _Control(path=os.path.join(OPTIONS_DIR, "jane_control.json")).load()
+
+
+def _column_name():
+    """Как колонка представляется.
+
+    Имя берётся из настроек, а не вписано здесь: к колонке обращаются по
+    имени из core.json, и второе имя рано или поздно с ним разойдётся -
+    а расхождение заметнее всего в ответе «как тебя зовут».
+    """
+    v = None
+    try:
+        v = getattr(core, "voiceAssNames", None) if core is not None else None
+    except Exception:
+        v = None
+    if isinstance(v, str) and v.strip():
+        return v.strip().capitalize()
+    if isinstance(v, (list, tuple)) and v:
+        return str(v[0]).strip().capitalize()
+    try:
+        with open(os.path.join(OPTIONS_DIR, "core.json"),
+                  encoding="utf-8") as f:
+            v = (json.load(f) or {}).get("voiceAssNames")
+        if isinstance(v, str) and v.strip():
+            return v.strip().capitalize()
+        if isinstance(v, (list, tuple)) and v:
+            return str(v[0]).strip().capitalize()
+    except Exception:
+        pass
+    return "Дженет"
 
 # Напоминания - не будильники. Будильник звонит, а напоминание говорит,
 # что человек просил не забыть. Разные вещи: будильник живёт по времени
@@ -2243,6 +2273,13 @@ def _answer_text(cmd):
         _HABITS.save()
     if re.search(r"что\s+я\s+(?:обычно|чаще всего|люблю)", low):
         return _HABITS.describe_top(), "habits", None
+
+    # Кто она и что умеет. Раньше на «кто ты» отвечала модель, и та
+    # представлялась Alibaba: колонка называлась чужой компанией.
+    _about = _about_answer(cmd, name=_column_name(),
+                          city=_HABITS.city)
+    if _about:
+        return _about[0], "about", None
 
     # Время и дата - раньше модели. Модель не знает, который час: она знает,
     # как звучит правдоподобный ответ. Часы, которые врут о времени, - не

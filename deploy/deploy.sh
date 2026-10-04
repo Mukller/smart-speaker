@@ -246,7 +246,7 @@ say "2/5 файлы внутри контейнера"
 for rel in webapi_client/index.html webapi_client/manifest.json \
            webapi_client/icon.svg \
            plugins/plugin_greetings.py \
-           voice_profiles.json runva_webapi.py jane_audio.py jane_time.py jane_wake.py jane_context.py jane_home.py jane_recipe.py jane_habits.py jane_when.py jane_control.py jane_remind.py; do
+           voice_profiles.json runva_webapi.py jane_audio.py jane_time.py jane_wake.py jane_context.py jane_home.py jane_recipe.py jane_habits.py jane_when.py jane_control.py jane_remind.py jane_about.py; do
     [ -f "$VENDOR/$rel" ] || { warn "нет файла $rel — пропускаю"; continue; }
     docker cp "$VENDOR/$rel" "$CONTAINER:/app/vendor/irene-va/$rel" \
         || die "docker cp не удался: $rel"

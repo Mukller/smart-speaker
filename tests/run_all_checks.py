@@ -17,6 +17,7 @@ CHECKS = [
     ("jane_when", "vendor/irene-va/jane_when.py"),
     ("jane_control", "vendor/irene-va/jane_control.py"),
     ("jane_remind", "vendor/irene-va/jane_remind.py"),
+    ("jane_about", "vendor/irene-va/jane_about.py"),
     ("маршруты", "tests/check_routes.py"),
 ]
 

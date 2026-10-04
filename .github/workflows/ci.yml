@@ -82,6 +82,11 @@ jobs:
       - name: reminders
         run: python vendor/irene-va/jane_remind.py
 
+      # Кто такая колонка и что она умеет: ответы собираются
+      # из того, что колонка правда умеет.
+      - name: about
+        run: python vendor/irene-va/jane_about.py
+
       # Время и дата голосом. Часы должны отвечать временем, а не тем,
       # как звучит правдоподобный ответ.
       - name: clock
