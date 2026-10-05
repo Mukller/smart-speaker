@@ -97,9 +97,64 @@ def runCmd(cmd:str,returnFormat:str):
     core.execute_next(cmd,core.context)
     core.remoteTTS = tmpformat
 
+# Промпт колонки. Его не было вообще, и это стоило дороже, чем размер модели.
+# Без него модель не знает, кто она и сколько ей говорить, поэтому писала
+# эссе по 200 слов - и на озвучку уходило по 10-12 секунд. Для голоса это
+# нетерпимо: человек к этому моменту уже сказал следующую фразу.
+# Плюс модель без указания роли отвечала «Конечно! Как я могу помочь?» -
+# то есть разговаривала с человеком, а не отвечала ему.
+LLM_SYSTEM = (
+    "Ты - голосовая колонка Дженет. Говоришь по-русски, живым голосом.\n"
+    "Отвечай одним-двумя короткими предложениями. Без вступлений, без "
+    "списков и перечислений, без повторов вопроса, без «конечно» и "
+    "«чем могу помочь».\n"
+    "Ты не составляешь планы, не пишешь списки и рецепты по шагам.\n"
+    "Ты не человек и не ассистент веб-страницы. Ты - колонка, которая "
+    "слышит, считает время, помнит просьбы и управляет домом.\n"
+    "Не называй себя моделью, нейросетью или разработчиком. Не упоминай "
+    "компании и модели.\n"
+    "Если не знаешь ответа - скажи это одной фразой и предложи, что умеешь."
+)
+
+# Ответ длиннее этого на голосовую колонку не нужен: всё равно человек
+# перестаёт слушать. Число подобрано замером - 120 токенов это примерно
+# три-четыре секунды речи.
+LLM_MAX_TOKENS = int(os.environ.get("JANE_LLM_TOKENS", "120") or 120)
+
+# Причина сбоя модели остаётся в журнале, но вслух не произносится.
+# Раньше колонка говорила «Ошибка LLM: ConnectionError(...)», и это был
+# единственный способ узнать о проблеме - услышать её.
+_LLM_DOWN_MSG = "Я не могу подумать, сервер не отвечает."
+
+# Ставится, когда ответ упёрся в наш лимит токенов. Это не брак модели: она
+# просто не договорила. Пока это не отличали от обрыва по существу, фильтр
+# объявлял «Не поняла» там, где ответ был нормальным, но недоговорённым.
+_LLM_TRUNCATED = False
+
+
+def _trim_to_sentence(text):
+    """Отбросить недоговорённый хвост, оставив последнюю целую фразу.
+
+    Короткий целый ответ лучше, чем отказ на месте.
+    """
+    t = (text or "").strip()
+    if not t or re.search(r"""[.!?…»"')\]]\s*$""", t):
+        return t
+    cut = max(t.rfind(". "), t.rfind("! "), t.rfind("? "),
+              t.rfind(".\n"), t.rfind("!\n"), t.rfind("?\n"))
+    # Обрезаем только если после обрезки остаётся осмысленное. Порог в
+    # символах по позиции границы тут обманчив: короткий ответ вида
+    # «Первый. Второй оборван» при неудачном пороге проходил целиком,
+    # вместе с обрывом.
+    out = t[:cut + 1].strip() if cut > 0 else ""
+    return out if len(out) >= 10 else t
+
+
 def call_ollama(prompt, model="qwen2.5:0.5b-instruct", stream=False):
     url = "http://172.17.0.1:11434/api/generate"
-    payload = {"model": model, "prompt": prompt, "stream": stream, "keep_alive": -1}
+    payload = {"model": model, "prompt": LLM_SYSTEM + "\n\n" + prompt,
+               "stream": stream, "keep_alive": -1,
+               "options": {"temperature": 0.3, "num_predict": LLM_MAX_TOKENS}}
     for attempt in range(1, 4):
         try:
             if stream:
@@ -108,10 +163,12 @@ def call_ollama(prompt, model="qwen2.5:0.5b-instruct", stream=False):
             else:
                 r = _ollama_session.post(url, json=payload, timeout=300)
                 data = r.json()
+                global _LLM_TRUNCATED
+                _LLM_TRUNCATED = (data.get("done_reason") == "length")
                 return data.get("response", "")
         except Exception as e:
             if attempt == 3:
-                return "Ошибка LLM: " + str(e)
+                return _LLM_DOWN_MSG
             time.sleep(2 ** attempt)
 
 
@@ -132,7 +189,7 @@ def stream_ollama(prompt, model="qwen2.5:0.5b-instruct"):
             thinking = data.get("thinking", "")
             yield token, thinking
     except Exception as e:
-        yield "", "Ошибка LLM: " + str(e)
+        yield "", _LLM_DOWN_MSG
 
 app = FastAPI()
 is_running = True
@@ -2457,7 +2514,10 @@ def _answer_text(cmd):
     # «обратитесь к оператору связи» - оператора у колонки нет.
     # Предположение, что большая модель это плавная деградация,
     # неверно: это генератор без состояния «не знаю».
-    return _guard_answer(call_ollama(cmd)), "llm", None
+    _reply = call_ollama(cmd)
+    if _LLM_TRUNCATED:
+        _reply = _trim_to_sentence(_reply)
+    return _guard_answer(_reply), "llm", None
 
 
 @app.get("/sendTxtCmd")
