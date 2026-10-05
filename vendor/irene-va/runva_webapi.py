@@ -175,7 +175,9 @@ def call_ollama(prompt, model="qwen2.5:0.5b-instruct", stream=False):
 def stream_ollama(prompt, model="qwen2.5:0.5b-instruct"):
     """Generator yielding (thinking, response) chunks from Ollama streaming."""
     url = "http://172.17.0.1:11434/api/generate"
-    payload = {"model": model, "prompt": prompt, "stream": True, "keep_alive": -1}
+    payload = {"model": model, "prompt": LLM_SYSTEM + "\n\n" + prompt,
+               "stream": True, "keep_alive": -1,
+               "options": {"temperature": 0.3, "num_predict": LLM_MAX_TOKENS}}
     try:
         r = _ollama_session.post(url, json=payload, stream=True, timeout=300)
         for line in r.iter_lines():
@@ -2426,6 +2428,18 @@ def _human_duration(secs):
 
 
 def _answer_text(cmd):
+    # Единая точка решения. Раньше маршрутизация была продублирована в
+    # потоковом маршруте, и две копии разошлись: «кто ты» в потоке уходило в
+    # модель, а в обычном запросе отвечало честно. Копии маршрутов - это
+    # ровно то, из-за чего текст и голос отвечают по-разному.
+    got = _deterministic_answer(cmd)
+    if got is not None:
+        return got
+    _reply = call_ollama(cmd)
+    if _LLM_TRUNCATED:
+        _reply = _trim_to_sentence(_reply)
+    return _guard_answer(_reply), "llm", None
+def _deterministic_answer(cmd):
     """Единый путь ответа: будильник, плеер, плагины, модель.
 
     Будильник проверяется первым: «поставь будильник на семь утра» не должно
@@ -2588,10 +2602,7 @@ def _answer_text(cmd):
     # «обратитесь к оператору связи» - оператора у колонки нет.
     # Предположение, что большая модель это плавная деградация,
     # неверно: это генератор без состояния «не знаю».
-    _reply = call_ollama(cmd)
-    if _LLM_TRUNCATED:
-        _reply = _trim_to_sentence(_reply)
-    return _guard_answer(_reply), "llm", None
+    return None
 
 
 @app.get("/sendTxtCmd")
@@ -2617,67 +2628,25 @@ async def sendSimpleTxtCmdStream(cmd:str, model:str = "qwen2.5:0.5b-instruct"):
         # Вежливость и здесь: голосом «спасибо» должно звучать так же,
         # как в текстовом ответе. Иначе колонка в зависимости от канала
         # отвечает на одно и то же по-разному.
-        _polite_tail = _strip_polite(cmd)
-        if _polite_tail:
-            cmd = _polite_tail
-        _bye = _bye_answer(cmd)
-        if _bye:
-            yield "data: " + json.dumps({"response": _bye[0],
-                                         "source": "bye"}) + "\n\n"
+        # Маршрутизация - та же, что и в обычном запросе. Никакой своей копии.
+        # Копия команды нужна здесь потому, что параметр cmd в потоке больше
+        # не переприсваивается: присваивание сделало бы его локальной
+        # переменной функции, и чтение раньше падало бы с UnboundLocalError.
+        q = cmd
+        got = _deterministic_answer(q)
+        if got is not None:
+            reply, src, act = got
+            payload = {"response": reply, "source": src}
+            if act:
+                payload["action"] = act
+            yield "data: " + json.dumps(payload) + "\n\n"
             yield "data: [DONE]\n\n"
             return
 
-        # Умный дом раньше плеера и модели: «включи свет» - это про дом,
-        # а не про музыку и не повод спросить языковую модель.
-        home = _home_answer(cmd)
-        if home is not None:
-            _CTX.remember(_CTX_TOPIC_HOME)
-            yield "data: " + json.dumps({"response": home[0], "source": "home",
-                                         "action": home[1]}) + "\n\n"
-            yield "data: [DONE]\n\n"
-            return
-        # Плеер: действие возвращаем структурно, интерфейс его выполнит
-        # Управление колонкой: повтори, громче, тише, стоп. Раньше плеера:
-        # «стоп» должен остановить музыку, а не уйти в модель.
-        _ctl = _CONTROL.parse(cmd)
-        if _ctl == "stop":
-            st = _player_command("стоп")
-            if st and st[1]:
-                yield "data: " + json.dumps({"response": "Остановила.",
-                                             "source": "control",
-                                             "action": "stop"}) + "\n\n"
-                yield "data: [DONE]\n\n"
-                return
-            yield "data: " + json.dumps({"response": "Остановилась.",
-                                         "source": "control"}) + "\n\n"
-            yield "data: [DONE]\n\n"
-            return
-        if _ctl in ("repeat", "louder", "softer"):
-            got = _CONTROL.apply(_ctl)
-            if got:
-                yield "data: " + json.dumps({"response": got,
-                                             "source": "control",
-                                             "action": _ctl}) + "\n\n"
-                yield "data: [DONE]\n\n"
-                return
-
-        player = _player_command(cmd)
-        if player is not None:
-            reply, action = player
-            yield "data: " + json.dumps({"response": reply, "source": "player",
-                                         "action": action}) + "\n\n"
-            yield "data: [DONE]\n\n"
-            return
-        # Плагин отвечает мгновенно и без "размышлений" - отдаём его сразу.
-        plugin_answer = _try_plugins(cmd)
-        if plugin_answer is not None:
-            yield "data: " + json.dumps({"response": plugin_answer, "source": "plugin"}) + "\n\n"
-            yield "data: [DONE]\n\n"
-            return
         thinking_parts = []
         response_parts = []
         try:
-            for token, thinking in stream_ollama(cmd, model=model):
+            for token, thinking in stream_ollama(q, model=model):
                 if thinking:
                     thinking_parts.append(thinking)
                 if token:

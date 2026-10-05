@@ -1034,6 +1034,7 @@ async function ask(cmd) {
   $("input").value = "";
   $("input").style.height = "auto";
   state.busy = true;
+  speechReset();
   state.lastAt = new Date();
   addMsg(text, "user", { at: state.lastAt });
   setStatus("Думаю");
@@ -1055,7 +1056,7 @@ async function ask(cmd) {
     state.last = out;
     $("ttsBtn").classList.remove("hidden");
     if (action) doAction(action);
-    speak(out);
+    flushSpeech(out);
   };
 
   const draw = () => {
@@ -1087,7 +1088,7 @@ async function ask(cmd) {
         try { d = JSON.parse(m[1]); } catch (e) { continue; }
         if (d.error) { addMsg("Ошибка: " + d.error, "error"); finish(null); return; }
         if (d.thinking) thinking = d.thinking;
-        if (d.response) { out = d.response; answered = true; }
+        if (d.response) { out = d.response; answered = true; queueFrom(out); }
         if (d.source) state.source = d.source;
         if (d.action) action = d.action;
         draw();
@@ -1156,12 +1157,17 @@ function setVoice(on) {
 }
 
 function stopVoice() {
+  stopVoiceAudio();
+  setSpeaking(false);
+  speechReset();
+  if ("speechSynthesis" in window) speechSynthesis.cancel();
+}
+
+function stopVoiceAudio() {
   if (voiceAudio) {
     voiceAudio.pause();
     voiceAudio = null;
   }
-  setSpeaking(false);
-  if ("speechSynthesis" in window) speechSynthesis.cancel();
 }
 
 function fallbackSpeak(t) {
@@ -1171,6 +1177,81 @@ function fallbackSpeak(t) {
     u.lang = "ru-RU";
     speechSynthesis.speak(u);
   } catch (e) { /* озвучка необязательна */ }
+}
+
+/* ---------- очередь озвучки: говорить, не дожидаясь конца ответа ----------
+   Ответ приходит потоком, а озвучка начиналась только когда поток кончался.
+   Для голоса это означало лишние секунды тишины: модель думает две-четыре
+   секунды, потом всё это синтезируется, и только потом звучит. Человек к
+   этому моменту обычно уже сказал следующую фразу.
+
+   Теперь первая завершённая фраза уходит в синтез сразу, не дожидаясь конца
+   всего ответа. Очередь нужна потому, что синтез идёт по одной фразе за раз,
+   а следующая может быть готова раньше, чем предыдущая договорит.
+
+   Полудуплекс при этом уже работает: setSpeaking гасит микрофон на всё время
+   очереди, и колонка не слышит себя. */
+const speechQ = [];
+let speechBusy = false;
+let spokenUpTo = 0;
+
+const SENT_END = /[.!?…][)"»']*(?=\s|$)/;
+
+function queueFrom(text) {
+  const t = text || "";
+  while (spokenUpTo < t.length) {
+    const m = SENT_END.exec(t.slice(spokenUpTo));
+    if (!m) break;
+    const end = spokenUpTo + m.index + m[0].length;
+    const part = t.slice(spokenUpTo, end).trim();
+    spokenUpTo = end;
+    if (part) speechQ.push(part);
+  }
+  pumpSpeech();
+}
+
+function flushSpeech(text) {
+  const tail = (text || "").slice(spokenUpTo).trim();
+  spokenUpTo = (text || "").length;
+  if (tail) speechQ.push(tail);
+  pumpSpeech();
+}
+
+function speechReset() {
+  speechQ.length = 0;
+  spokenUpTo = 0;
+  speechBusy = false;
+}
+
+function pumpSpeech() {
+  if (speechBusy) return;
+  if (!speechQ.length) { setSpeaking(false); return; }
+  const part = speechQ.shift();
+  speechBusy = true;
+  setSpeaking(true);
+  playChunk(part);
+}
+
+async function playChunk(text) {
+  let url = null;
+  const done = () => {
+    if (url) URL.revokeObjectURL(url);
+    speechBusy = false;
+    pumpSpeech();
+  };
+  try {
+    const r = await fetch(API + "/tts?text=" + encodeURIComponent(text));
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    url = URL.createObjectURL(await r.blob());
+    stopVoiceAudio();
+    voiceAudio = new Audio(url);
+    voiceAudio.onended = done;
+    voiceAudio.onerror = done;
+    await voiceAudio.play().catch(() => { setSpeaking(false); fallbackSpeak(text); done(); });
+  } catch (e) {
+    fallbackSpeak(text);
+    done();
+  }
 }
 
 async function speak(text) {
