@@ -1306,7 +1306,43 @@ _REMIND_LIST = []
 _REMIND_SEQ = [0]
 # Чего ждём уточнения: сказали «напомни купить хлеб» без времени - колонка
 # обязана спросить, а не придумать время сама.
-_REMIND_PENDING = {"text": None}
+_REMIND_PENDING = {"text": None, "at": 0.0}
+
+# Незаконченный «напомни купить хлеб» ждёт уточнения недолго. Две минуты:
+# договорить «напомни купить хлеб через час» успевают, а через десять минут
+# человек уже и не помнит, о чём говорил.
+_REMIND_TTL = 120.0
+
+# Уточнение времени: «через час», «в семь», «завтра утром». Слова, которыми
+# продолжают именно вопрос про время, а не начинают новую команду.
+_RE_TIME_WORDS = (
+    "час", "минут", "секунд", "часa", "утр", "вечер", "ночь", "днем", "днём",
+    "завтра", "сегодня", "ночью", "обед", "полдень", "полночь",
+)
+# Команды, которые не должны перехватываться вопросом о времени. Здесь важно
+# ловить и «таймер», и «будильник»: и то и другое звучит как уточнение
+# времени, но это отдельные команды.
+_RE_OTHER_CMD = (
+    "таймер", "буди", "будильник", "напомни", "напомнить", "музык", "песн",
+    "песня", "свет", "лампа", "телевизор", "громче", "тише", "стоп",
+    "повтори", "выключ", "включ", "погода", "градус", "температур",
+)
+
+
+def _is_time_answer(cmd):
+    """Похоже ли это на ответ про время, а не на новую команду."""
+    p = " ".join((cmd or "").lower().replace("ё", "е").split())
+    if not p:
+        return False
+    if any(w in p for w in _RE_TIME_WORDS):
+        return True
+    return bool(re.match(r"^\s*(?:через|в|во|на|за)\s+\d+", p))
+
+
+def _is_other_command(cmd):
+    """Похоже ли это на самостоятельную команду, которую нельзя съесть."""
+    p = " ".join((cmd or "").lower().replace("ё", "е").split())
+    return any(w in p for w in _RE_OTHER_CMD)
 
 
 def _reminders_load():
@@ -2239,19 +2275,41 @@ def _weather_city_apply():
     return None
 
 
+def _core_context_clear():
+    """Стереть незаконченный вопрос, оставленный плагином.
+
+    Плагины ядра держат состояние «задал вопрос и ждёт продолжения».
+    Наш вход - это одна законченная фраза из HTTP-запроса, продолжать её
+    нечем, и оставлять состояние после себя нельзя: плагин таймера, не
+    разобрав «поставь таймер на чай», оставлял контекст без срока, после
+    чего ядро любую фразу считало продолжением старой команды. Погода,
+    музыка и всё остальное переставали работать до перезапуска контейнера.
+    """
+    fn = getattr(core, "context_clear", None)
+    if callable(fn):
+        try:
+            fn()
+        except Exception:
+            pass
+
+
 def _try_plugins(cmd):
     """Возвращает текст ответа плагина или None, если плагин не сработал."""
     if any(w in (cmd or "").lower() for w in ("погод", "градус", "дождь")):
         _weather_city_apply()
+    _core_context_clear()
     try:
         saved_tts = core.remoteTTS
         saved_res = core.remoteTTSResult
         core.remoteTTS = "saytxt,none"
         core.remoteTTSResult = {}
-        ran = core.run_input_str(_with_call_name(cmd))
-        result = (core.remoteTTSResult or {}).get("restxt", "")
-        core.remoteTTS = saved_tts
-        core.remoteTTSResult = saved_res
+        try:
+            ran = core.run_input_str(_with_call_name(cmd))
+            result = (core.remoteTTSResult or {}).get("restxt", "")
+        finally:
+            core.remoteTTS = saved_tts
+            core.remoteTTSResult = saved_res
+            _core_context_clear()
         text = str(result).strip() if result else ""
         if not ran or not text:
             return None
@@ -2301,20 +2359,27 @@ def _player_command(cmd):
          "Тише", "volume_down"),
         (("выключи звук", "без звука", "заглуши", "mute"), "Звук выключен", "mute"),
         (("включи звук", "звук включи", "unmute"), "Звук включён", "unmute"),
-        (("пауза", "подожди", "стой", "остановись", "хватит", "pause", "стоп музыку"),
+        (("пауза", "подожди", "стой", "остановись", "хватит", "pause", "стоп музыку",
+          "выключи музыку", "выключить музыку", "останови музыку",
+          "без музыки", "убери музыку"),
          "Пауза", "pause"),
         (("следующая станция", "другая станция", "следующее радио"),
          "Следующая станция", "next"),
         (("включи музыку", "включи радио", "поставь музыку", "играй музыку",
-          "включи песню", "играй", "давай музыку", "play", "музыку"),
+          "включи песню", "играй", "давай музыку", "play"),
          "Включаю", "play"),
         (("что играет", "что звучит", "что за музыка"),
          "Сейчас играет", "now_playing"),
         (("отмени таймер", "отмени будильник", "сними таймер",
           "отменить таймер", "отменить будильник", "выключи таймер"),
          "Таймер отменён", "cancel_timers"),
-        (("сколько осталось", "сколько до таймера", "таймер сколько"),
-         "Таймер", "timers_status"),
+        # Список таймеров. Раньше «какой таймер» и «таймеры» уходили дальше и
+        # попадали в плагин таймера, который на голое слово «таймер»
+        # СТАВИТ таймер на пять минут. Вопрос не должен создавать состояние.
+        (("какой таймер", "какие таймеры", "таймеры", "какой будильник",
+          "какие будильники", "сколько осталось", "сколько до таймера",
+          "таймер сколько", "проверь таймер", "будильники"),
+         "Проверяю таймеры.", "timers_status"),
     ]
     for words, reply, action in table:
         if any(w in text for w in words):
@@ -2480,6 +2545,7 @@ def _answer_text(cmd):
         if _rem["at"] is None:
             # Время не названо. Спрашиваем и ждём уточнения, а не выдумываем.
             _REMIND_PENDING["text"] = _rem["text"]
+            _REMIND_PENDING["at"] = time.time()
             return ("Запомнила: %s. Когда напомнить?" % _rem["text"],
                     "remind", None)
         it = _reminders_add(_rem["text"], _rem["at"])
@@ -2489,15 +2555,23 @@ def _answer_text(cmd):
                    it["text"])), "remind", None
 
     # Уточнение к прошлому напоминанию: «через час» после вопроса.
-    if _REMIND_PENDING["text"] and re.search(
-            r"\b(?:через|в|во|на)\s+\w+", (cmd or "").lower()):
-        got = _parse_reminder("напомни " + _REMIND_PENDING["text"] + " " + cmd)
-        if got and got["at"]:
-            it = _reminders_add(got["text"], got["at"])
+    #
+    # Два условия, и оба обязательны. Первое - время жизни: незаконченный
+    # вопрос не должен висеть вечно. Второе - команда должна быть именно
+    # уточнением, а не новой командой. Без второго «поставь таймер на 5 минут»
+    # перехватывалось незавершённым «напомни купить хлеб» и создавало
+    # напоминание «купить хлеб поставь таймер на 5 минут» через четыре часа.
+    if _REMIND_PENDING["text"]:
+        if time.time() - _REMIND_PENDING.get("at", 0) > _REMIND_TTL:
             _REMIND_PENDING["text"] = None
-            return ("Напомню через %s: %s."
-                    % (_remind_when(it["at"]).replace("через ", ""),
-                       it["text"])), "remind", None
+        elif _is_time_answer(cmd) and not _is_other_command(cmd):
+            got = _parse_reminder("напомни " + _REMIND_PENDING["text"] + " " + cmd)
+            if got and got["at"]:
+                it = _reminders_add(got["text"], got["at"])
+                _REMIND_PENDING["text"] = None
+                return ("Напомню через %s: %s."
+                        % (_remind_when(it["at"]).replace("через ", ""),
+                           it["text"])), "remind", None
 
     player = _player_command(cmd)
     if player is not None:
